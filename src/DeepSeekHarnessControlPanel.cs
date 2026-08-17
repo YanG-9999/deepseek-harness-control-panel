@@ -636,7 +636,7 @@ public sealed class ManagerForm : Form
         }
         if (String.IsNullOrEmpty(version))
             throw new InvalidOperationException("无法读取 Node.js 官方 LTS 版本列表。");
-        string url = "https://nodejs.org/dist/" + version + "/" + version + "-win-x64.zip";
+        string url = "https://nodejs.org/dist/" + version + "/node-" + version + "-win-x64.zip";
         string zip = Path.Combine(Path.GetTempPath(), "dsh-node-" + version + ".zip");
         await DownloadFileAsync(url, zip);
         return zip;
