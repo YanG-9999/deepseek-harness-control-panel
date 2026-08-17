@@ -1097,6 +1097,8 @@ public sealed class ManagerForm : Form
         psi.CreateNoWindow = true;
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.StandardErrorEncoding = Encoding.UTF8;
         try
         {
             string pathKey = psi.EnvironmentVariables.Keys.Cast<string>()
