@@ -623,7 +623,8 @@ public sealed class ManagerForm : Form
                 if (files != null)
                 {
                     foreach (object file in files)
-                        if (String.Equals(file.ToString(), "win-x64", StringComparison.OrdinalIgnoreCase))
+                        if (String.Equals(file.ToString(), "win-x64-zip", StringComparison.OrdinalIgnoreCase) ||
+                            String.Equals(file.ToString(), "win-x64", StringComparison.OrdinalIgnoreCase))
                             winX64 = true;
                 }
                 if (lts && winX64)
