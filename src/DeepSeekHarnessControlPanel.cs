@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 using System.Management;
+using Microsoft.Win32;
 
 public sealed class ManagerForm : Form
 {
@@ -21,6 +22,7 @@ public sealed class ManagerForm : Form
     private const string RepoApiTemplate = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/{0}";
     private const string RepoZipTemplate = "https://github.com/deepseek-ai/deepseek-harness/archive/refs/heads/{0}.zip";
     private const string NodeIndex = "https://nodejs.org/dist/index.json";
+    private const int FallbackMinimumNodeMajor = 20;
 
     private readonly Label pathBox = new Label();
     private readonly Label statusLabel = new Label();
@@ -40,6 +42,9 @@ public sealed class ManagerForm : Form
     private bool busy;
     private Process server;
     private List<string> discoveredRoots = new List<string>();
+    private string selectedNodeDirectory = "";
+    private string selectedPnpm = "";
+    private string selectedCorepack = "";
 
     public ManagerForm()
     {
@@ -431,16 +436,7 @@ public sealed class ManagerForm : Form
             Directory.Move(stage, installRoot);
             ownsInstallRoot = true;
             Directory.CreateDirectory(Path.Combine(installRoot, "logs"));
-            if (String.IsNullOrEmpty(FindExecutable("node.exe")))
-            {
-                string nodeZip = await DownloadNodeAsync();
-                Log("Node.js 已下载，正在配置 Harness 私有运行环境。");
-                InstallNode(nodeZip);
-            }
-            else
-            {
-                Log("检测到系统 Node.js，使用现有运行环境。");
-            }
+            await EnsureNodeAsync();
             await PreparePnpmAsync();
             await RunToolAsync("pnpm install", "install");
             await RunToolAsync("pnpm run build", "build");
@@ -461,6 +457,8 @@ public sealed class ManagerForm : Form
     {
         if (!IsInstalled())
             throw new InvalidOperationException("尚未安装 Harness，请先点击“一键安装”。");
+        await EnsureNodeAsync();
+        await PreparePnpmAsync();
         if (IsPortOpen(3080))
         {
             int owner = FindPortOwner(3080);
@@ -564,6 +562,7 @@ public sealed class ManagerForm : Form
             Directory.Move(stage, Root);
             CopyPersistentDirectory(backup, Root, ".dsh-runtime");
             CopyPersistentDirectory(backup, Root, "logs");
+            await EnsureNodeAsync();
             await PreparePnpmAsync();
             await RunToolAsync("pnpm install", "update-install");
             await RunToolAsync("pnpm run build", "update-build");
@@ -642,6 +641,77 @@ public sealed class ManagerForm : Form
         return zip;
     }
 
+    private async Task EnsureNodeAsync()
+    {
+        string requirement = GetRequiredNodeRequirement();
+        Version systemVersion = null;
+        foreach (string systemNode in FindSystemExecutables("node.exe"))
+        {
+            Version candidateVersion;
+            if (!TryGetToolVersion(systemNode, "--version", out candidateVersion))
+                continue;
+            if (systemVersion == null)
+                systemVersion = candidateVersion;
+            if (!IsNodeCompatible(candidateVersion, requirement))
+                continue;
+            systemVersion = candidateVersion;
+            selectedNodeDirectory = Path.GetDirectoryName(systemNode);
+            Log("Node.js 可用: " + systemVersion + "（系统安装，要求 " + requirement + "）。");
+            return;
+        }
+
+        string privateNode = FindPrivateExecutable("node.exe");
+        Version privateVersion;
+        if (TryGetToolVersion(privateNode, "--version", out privateVersion) && IsNodeCompatible(privateVersion, requirement))
+        {
+            selectedNodeDirectory = Path.GetDirectoryName(privateNode);
+            Log("Node.js 可用: " + privateVersion + "（Harness 专用运行环境，要求 " + requirement + "）。");
+            return;
+        }
+
+        string current = systemVersion == null ? "未检测到" : systemVersion.ToString();
+        string message = systemVersion == null
+            ? "未检测到可用的 Node.js。将下载官方 Node.js LTS，并仅配置给 DeepSeek Harness 使用，不会修改系统中的其他项目。是否继续？"
+            : "检测到系统 Node.js " + current + "，但 Harness 要求 " + requirement + "。将下载官方 Node.js LTS，并仅配置给 DeepSeek Harness 使用，不会修改系统 Node.js。是否继续？";
+        if (Ask(message, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            throw new InvalidOperationException("未配置符合要求的 Node.js，安装已取消。");
+
+        string nodeZip = await DownloadNodeAsync();
+        Log("Node.js 已下载，正在配置 Harness 专用运行环境。");
+        InstallNode(nodeZip);
+        string installedNode = FindPrivateExecutable("node.exe");
+        Version installedVersion;
+        if (!TryGetToolVersion(installedNode, "--version", out installedVersion))
+            throw new InvalidOperationException("Node.js 已解压，但无法执行 node --version。请检查安全软件或文件权限。");
+        if (!IsNodeCompatible(installedVersion, requirement))
+            throw new InvalidOperationException("下载的 Node.js " + installedVersion + " 不满足 Harness 要求 " + requirement + "。");
+        selectedNodeDirectory = Path.GetDirectoryName(installedNode);
+        Log("Node.js 已就绪: " + installedVersion + "。");
+    }
+
+    private string GetRequiredNodeRequirement()
+    {
+        string packageJson = Path.Combine(Source, "package.json");
+        if (!File.Exists(packageJson))
+            return ">=" + FallbackMinimumNodeMajor;
+        string json = File.ReadAllText(packageJson);
+        Match match = Regex.Match(json, "\\\"engines\\\"\\s*:\\s*\\{.*?\\\"node\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", RegexOptions.Singleline);
+        return match.Success ? match.Groups[1].Value : ">=" + FallbackMinimumNodeMajor;
+    }
+
+    private bool IsNodeCompatible(Version installed, string requirement)
+    {
+        if (installed == null)
+            return false;
+        Match minimum = Regex.Match(requirement ?? "", "(?:>=|\\^|~)?\\s*(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?");
+        if (!minimum.Success)
+            return installed.Major >= FallbackMinimumNodeMajor;
+        int major = Int32.Parse(minimum.Groups[1].Value);
+        int minor = minimum.Groups[2].Success ? Int32.Parse(minimum.Groups[2].Value) : 0;
+        int build = minimum.Groups[3].Success ? Int32.Parse(minimum.Groups[3].Value) : 0;
+        return installed >= new Version(major, minor, build);
+    }
+
     private void InstallNode(string zip)
     {
         string runtimeRoot = Path.Combine(Root, ".dsh-runtime");
@@ -657,6 +727,7 @@ public sealed class ManagerForm : Form
         if (Directory.Exists(Runtime)) DeleteDirectoryTree(Runtime);
         CopyDirectory(extracted, Path.Combine(runtimeRoot, "node"));
         Directory.Delete(extract, true);
+        selectedNodeDirectory = Runtime;
     }
 
     private async Task<string> DownloadSourceAsync(string destination)
@@ -790,27 +861,81 @@ public sealed class ManagerForm : Form
 
     private async Task PreparePnpmAsync()
     {
-        string packageJson = File.ReadAllText(Path.Combine(Source, "package.json"));
-        Match match = Regex.Match(packageJson, "\"packageManager\"\\s*:\\s*\"pnpm@([^\"]+)\"");
-        string version = match.Success ? match.Groups[1].Value : "11.7.0";
-        if (!String.IsNullOrEmpty(FindExecutable("pnpm.cmd")))
+        string required = GetRequiredPnpmVersion();
+        selectedPnpm = "";
+        selectedCorepack = "";
+
+        Version systemVersion = null;
+        foreach (string systemPnpm in FindSystemExecutables("pnpm.cmd"))
         {
-            Log("检测到系统 pnpm，将直接使用系统运行环境。");
+            Version candidateVersion;
+            if (!TryGetToolVersion(systemPnpm, "--version", out candidateVersion))
+                continue;
+            if (systemVersion == null)
+                systemVersion = candidateVersion;
+            if (!IsPnpmCompatible(candidateVersion, required))
+                continue;
+            systemVersion = candidateVersion;
+            selectedPnpm = systemPnpm;
+            Log("pnpm 可用: " + systemVersion + "（系统安装，要求 " + required + "）。");
             return;
         }
-        if (!String.IsNullOrEmpty(FindExecutable("corepack.cmd")))
+
+        string privatePnpm = FindPrivateExecutable("pnpm.cmd");
+        Version privateVersion;
+        if (TryGetToolVersion(privatePnpm, "--version", out privateVersion) && IsPnpmCompatible(privateVersion, required))
         {
-            await RunToolAsync("corepack prepare pnpm@" + version + " --activate", "corepack-prepare");
+            selectedPnpm = privatePnpm;
+            Log("pnpm 可用: " + privateVersion + "（Harness 专用运行环境，要求 " + required + "）。");
             return;
         }
+
+        string found = systemVersion == null ? "未检测到" : systemVersion.ToString();
+        string prompt = systemVersion == null
+            ? "未检测到可用的 pnpm。需要配置 pnpm@" + required + " 供 DeepSeek Harness 使用，是否继续？"
+            : "检测到系统 pnpm " + found + "，但 Harness 要求 " + required + "。需要为 Harness 配置兼容的 pnpm，不会修改系统 pnpm，是否继续？";
+        if (Ask(prompt, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            throw new InvalidOperationException("未配置符合要求的 pnpm，操作已取消。");
+
+        string corepack = FindExecutable("corepack.cmd");
+        if (!String.IsNullOrEmpty(corepack))
+        {
+            Log("> corepack prepare pnpm@" + required + " --activate");
+            int code = await RunProcessAsync(NewProcess(corepack, "prepare pnpm@" + required + " --activate", Source));
+            Version corepackVersion;
+            if (code == 0 && TryGetToolVersion(corepack, "pnpm --version", out corepackVersion) && IsPnpmCompatible(corepackVersion, required))
+            {
+                selectedCorepack = corepack;
+                Log("pnpm 已通过 Corepack 配置: " + corepackVersion + "。");
+                return;
+            }
+            Log("Corepack 未能配置兼容 pnpm，改用 npm 安装。");
+        }
+
         string npm = FindExecutable("npm.cmd");
         if (String.IsNullOrEmpty(npm))
-            throw new InvalidOperationException("未找到可用的 npm、Corepack 或 pnpm 运行环境。");
+            throw new InvalidOperationException("未找到可用的 npm 或 Corepack，无法配置 pnpm。");
         Directory.CreateDirectory(Runtime);
-        Log("> npm install --global pnpm@" + version);
-        int code = await RunProcessAsync(NewProcess(npm, "install --global --prefix \"" + Runtime + "\" pnpm@" + version, Source));
-        if (code != 0 || String.IsNullOrEmpty(FindExecutable("pnpm.cmd")))
-            throw new InvalidOperationException("自动配置 pnpm 失败，退出码 " + code + "。");
+        Log("> npm install --global pnpm@" + required);
+        int installCode = await RunProcessAsync(NewProcess(npm, "install --global --prefix \"" + Runtime + "\" pnpm@" + required, Source));
+        privatePnpm = FindPrivateExecutable("pnpm.cmd");
+        if (installCode != 0 || !TryGetToolVersion(privatePnpm, "--version", out privateVersion) || !IsPnpmCompatible(privateVersion, required))
+            throw new InvalidOperationException("自动配置 pnpm 失败，退出码 " + installCode + "。");
+        selectedPnpm = privatePnpm;
+        Log("pnpm 已就绪: " + privateVersion + "。");
+    }
+
+    private string GetRequiredPnpmVersion()
+    {
+        string json = File.ReadAllText(Path.Combine(Source, "package.json"));
+        Match match = Regex.Match(json, "\"packageManager\"\\s*:\\s*\"pnpm@([0-9]+(?:\\.[0-9]+){0,2})");
+        return match.Success ? match.Groups[1].Value : "11.7.0";
+    }
+
+    private bool IsPnpmCompatible(Version installed, string required)
+    {
+        Version expected;
+        return installed != null && TryParseVersion(required, out expected) && installed == expected;
     }
 
     private async Task RunToolAsync(string command, string logName)
@@ -860,32 +985,108 @@ public sealed class ManagerForm : Form
 
     private ProcessStartInfo NewPnpmProcess(string args, string workingDirectory)
     {
-        string pnpm = FindExecutable("pnpm.cmd");
-        if (!String.IsNullOrEmpty(pnpm))
-            return NewProcess(pnpm, args, workingDirectory);
-        string corepack = FindExecutable("corepack.cmd");
-        if (!String.IsNullOrEmpty(corepack))
-            return NewProcess(corepack, "pnpm " + args, workingDirectory);
+        if (!String.IsNullOrEmpty(selectedPnpm))
+            return NewProcess(selectedPnpm, args, workingDirectory);
+        if (!String.IsNullOrEmpty(selectedCorepack))
+            return NewProcess(selectedCorepack, "pnpm " + args, workingDirectory);
         throw new InvalidOperationException("未找到可用的 Node.js、Corepack 或 pnpm 运行环境。");
     }
 
     private string FindExecutable(string fileName)
     {
+        string local = FindPrivateExecutable(fileName);
+        return !String.IsNullOrEmpty(local) ? local : FindSystemExecutable(fileName);
+    }
+
+    private string FindPrivateExecutable(string fileName)
+    {
         string local = Path.Combine(Runtime, fileName);
-        if (File.Exists(local))
-            return local;
+        return File.Exists(local) ? local : null;
+    }
+
+    private string FindSystemExecutable(string fileName)
+    {
+        return FindSystemExecutables(fileName).FirstOrDefault();
+    }
+
+    private List<string> FindSystemExecutables(string fileName)
+    {
+        var matches = new List<string>();
+        Action<string> add = delegate(string candidate)
+        {
+            if (String.IsNullOrWhiteSpace(candidate))
+                return;
+            string full = candidate.Trim().Trim('"');
+            if (File.Exists(full) && !matches.Any(x => String.Equals(x, full, StringComparison.OrdinalIgnoreCase)))
+                matches.Add(full);
+        };
         string path = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (string folder in path.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
         {
             try
             {
-                string candidate = Path.Combine(folder.Trim().Trim('"'), fileName);
-                if (File.Exists(candidate))
-                    return candidate;
+                add(Path.Combine(folder.Trim().Trim('"'), fileName));
             }
             catch { }
         }
-        return null;
+        add(ReadAppPath(fileName, Registry.CurrentUser));
+        add(ReadAppPath(fileName, Registry.LocalMachine));
+        string[] commonFolders = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "nodejs"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "nodejs")
+        };
+        foreach (string folder in commonFolders)
+        {
+            add(Path.Combine(folder, fileName));
+        }
+        return matches;
+    }
+
+    private string ReadAppPath(string fileName, RegistryKey hive)
+    {
+        try
+        {
+            using (RegistryKey key = hive.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + fileName))
+            {
+                if (key == null)
+                    return null;
+                return key.GetValue(null) as string;
+            }
+        }
+        catch { return null; }
+    }
+
+    private bool TryGetToolVersion(string file, string arguments, out Version version)
+    {
+        version = null;
+        if (String.IsNullOrEmpty(file) || !File.Exists(file))
+            return false;
+        try
+        {
+            var psi = NewProcess(file, arguments, Source);
+            using (var process = Process.Start(psi))
+            {
+                string output = process.StandardOutput.ReadToEnd() + " " + process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                return process.ExitCode == 0 && TryParseVersion(output, out version);
+            }
+        }
+        catch { return false; }
+    }
+
+    private bool TryParseVersion(string text, out Version version)
+    {
+        version = null;
+        Match match = Regex.Match(text ?? "", "v?(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?");
+        if (!match.Success)
+            return false;
+        int major = Int32.Parse(match.Groups[1].Value);
+        int minor = match.Groups[2].Success ? Int32.Parse(match.Groups[2].Value) : 0;
+        int build = match.Groups[3].Success ? Int32.Parse(match.Groups[3].Value) : 0;
+        version = new Version(major, minor, build);
+        return true;
     }
 
     private ProcessStartInfo NewProcess(string file, string args, string workingDirectory)
@@ -900,7 +1101,8 @@ public sealed class ManagerForm : Form
         {
             string pathKey = psi.EnvironmentVariables.Keys.Cast<string>()
                 .FirstOrDefault(key => String.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)) ?? "PATH";
-            psi.EnvironmentVariables[pathKey] = Runtime + ";" + Environment.GetEnvironmentVariable("PATH");
+            string nodePath = String.IsNullOrEmpty(selectedNodeDirectory) ? Runtime : selectedNodeDirectory;
+            psi.EnvironmentVariables[pathKey] = nodePath + ";" + Environment.GetEnvironmentVariable("PATH");
         }
         catch (ArgumentException)
         {
