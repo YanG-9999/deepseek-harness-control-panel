@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -26,18 +25,18 @@ public sealed class ManagerForm : Form
     private const int FallbackMinimumNodeMajor = 20;
 
     private readonly Label pathBox = new Label();
-    private readonly StatusValueLabel statusLabel = new StatusValueLabel();
-    private readonly StatusValueLabel runningLabel = new StatusValueLabel();
+    private readonly Label statusLabel = new Label();
+    private readonly Label runningLabel = new Label();
     private readonly Label versionLabel = new Label();
     private readonly TextBox logBox = new TextBox();
-    private readonly AppleButton installButton = new AppleButton();
-    private readonly AppleButton startButton = new AppleButton();
-    private readonly AppleButton restartButton = new AppleButton();
-    private readonly AppleButton stopButton = new AppleButton();
-    private readonly AppleButton updateButton = new AppleButton();
-    private readonly AppleButton openButton = new AppleButton();
-    private readonly AppleButton rescanButton = new AppleButton();
-    private readonly AppleButton openFolderButton = new AppleButton();
+    private readonly Button installButton = new Button();
+    private readonly Button startButton = new Button();
+    private readonly Button restartButton = new Button();
+    private readonly Button stopButton = new Button();
+    private readonly Button updateButton = new Button();
+    private readonly Button openButton = new Button();
+    private readonly Button rescanButton = new Button();
+    private readonly Button openFolderButton = new Button();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -51,12 +50,11 @@ public sealed class ManagerForm : Form
     {
         Text = "DeepSeek Harness 控制面板";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        Width = 980;
-        Height = 680;
-        MinimumSize = new Size(940, 560);
+        Width = 760;
+        Height = 560;
+        MinimumSize = new Size(700, 480);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9F);
-        BackColor = Color.FromArgb(246, 247, 249);
 
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
@@ -71,25 +69,67 @@ public sealed class ManagerForm : Form
     {
         var main = new TableLayoutPanel();
         main.Dock = DockStyle.Fill;
-        main.Padding = new Padding(20, 18, 20, 20);
-        main.BackColor = BackColor;
-        main.RowCount = 5;
+        main.Padding = new Padding(14);
+        main.RowCount = 6;
         main.ColumnCount = 1;
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(main);
 
-        main.Controls.Add(BuildStatusCard(), 0, 0);
+        var pathPanel = new TableLayoutPanel();
+        pathPanel.Dock = DockStyle.Fill;
+        pathPanel.ColumnCount = 2;
+        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var pathLabel = new Label { Text = "安装目录", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+        pathBox.Dock = DockStyle.Fill;
+        pathBox.TextAlign = ContentAlignment.MiddleLeft;
+        pathBox.AutoEllipsis = true;
+        pathPanel.Controls.Add(pathLabel, 0, 0);
+        pathPanel.Controls.Add(pathBox, 1, 0);
+        main.Controls.Add(pathPanel, 0, 0);
+
+        var statePanel = new TableLayoutPanel();
+        statePanel.Dock = DockStyle.Fill;
+        statePanel.ColumnCount = 2;
+        statePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        statePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        statePanel.Controls.Add(new Label { Text = "状态", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        statusLabel.Dock = DockStyle.Fill;
+        statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        statePanel.Controls.Add(statusLabel, 1, 0);
+        main.Controls.Add(statePanel, 0, 1);
+
+        var runningPanel = new TableLayoutPanel();
+        runningPanel.Dock = DockStyle.Fill;
+        runningPanel.ColumnCount = 2;
+        runningPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        runningPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        runningPanel.Controls.Add(new Label { Text = "运行状态", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        runningLabel.Dock = DockStyle.Fill;
+        runningLabel.TextAlign = ContentAlignment.MiddleLeft;
+        runningPanel.Controls.Add(runningLabel, 1, 0);
+        main.Controls.Add(runningPanel, 0, 2);
+
+        var infoPanel = new TableLayoutPanel();
+        infoPanel.Dock = DockStyle.Fill;
+        infoPanel.ColumnCount = 2;
+        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        infoPanel.Controls.Add(new Label { Text = "Harness 版本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        versionLabel.Dock = DockStyle.Fill;
+        versionLabel.TextAlign = ContentAlignment.MiddleLeft;
+        infoPanel.Controls.Add(versionLabel, 1, 0);
+        main.Controls.Add(infoPanel, 0, 3);
 
         var buttons = new FlowLayoutPanel();
         buttons.Dock = DockStyle.Fill;
         buttons.WrapContents = false;
-        buttons.AutoScroll = false;
-        buttons.Padding = new Padding(0, 2, 0, 2);
-        buttons.BackColor = BackColor;
+        buttons.AutoScroll = true;
         AddButton(buttons, installButton, "一键安装", InstallClick);
         AddButton(buttons, startButton, "启动", StartClick);
         AddButton(buttons, restartButton, "重启", RestartClick);
@@ -98,122 +138,23 @@ public sealed class ManagerForm : Form
         AddButton(buttons, openButton, "打开页面", OpenClick);
         AddButton(buttons, rescanButton, "重新扫描", RescanClick);
         AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
-        main.Controls.Add(buttons, 0, 2);
+        main.Controls.Add(buttons, 0, 4);
 
-        var logCard = new AppleCardPanel();
-        logCard.Dock = DockStyle.Fill;
-        logCard.Padding = new Padding(18, 14, 18, 14);
         logBox.Multiline = true;
         logBox.ReadOnly = true;
         logBox.ScrollBars = ScrollBars.Vertical;
         logBox.Dock = DockStyle.Fill;
-        logBox.BorderStyle = BorderStyle.None;
         logBox.BackColor = Color.White;
-        logBox.ForeColor = Color.FromArgb(75, 85, 99);
-        logBox.Font = new Font("Microsoft YaHei UI", 9.5F);
-        logBox.Margin = new Padding(0);
-        logCard.Controls.Add(logBox);
-        main.Controls.Add(logCard, 0, 4);
+        main.Controls.Add(logBox, 0, 5);
     }
 
-    private Control BuildStatusCard()
-    {
-        var card = new AppleCardPanel();
-        card.Dock = DockStyle.Fill;
-        card.Padding = new Padding(26, 14, 26, 14);
-        card.DrawRowSeparators = true;
-
-        var grid = new TableLayoutPanel();
-        grid.Dock = DockStyle.Fill;
-        grid.BackColor = Color.Transparent;
-        grid.ColumnCount = 3;
-        grid.RowCount = 4;
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 4; i++)
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
-
-        pathBox.Dock = DockStyle.Fill;
-        pathBox.TextAlign = ContentAlignment.MiddleLeft;
-        pathBox.AutoEllipsis = true;
-        pathBox.Margin = new Padding(0);
-        pathBox.Font = new Font("Microsoft YaHei UI", 10F);
-        pathBox.ForeColor = Color.FromArgb(82, 92, 108);
-
-        StyleStatusLabel(statusLabel);
-        StyleStatusLabel(runningLabel);
-        StyleValueLabel(versionLabel);
-
-        AddInfoRow(grid, 0, "安装目录", "folder", pathBox);
-        AddInfoRow(grid, 1, "状态", "status", statusLabel);
-        AddInfoRow(grid, 2, "运行状态", "running", runningLabel);
-        AddInfoRow(grid, 3, "Harness 版本", "info", versionLabel);
-        card.Controls.Add(grid);
-        return card;
-    }
-
-    private void AddInfoRow(TableLayoutPanel grid, int row, string label, string icon, Control value)
-    {
-        var iconLabel = new LineIconLabel();
-        iconLabel.Dock = DockStyle.Fill;
-        iconLabel.Kind = icon;
-        iconLabel.Margin = new Padding(0, 3, 0, 3);
-
-        var nameLabel = new Label();
-        nameLabel.Text = label;
-        nameLabel.Dock = DockStyle.Fill;
-        nameLabel.TextAlign = ContentAlignment.MiddleLeft;
-        nameLabel.Margin = new Padding(0);
-        nameLabel.Font = new Font("Microsoft YaHei UI", 10F);
-        nameLabel.ForeColor = Color.FromArgb(35, 40, 48);
-
-        value.Margin = new Padding(0);
-        grid.Controls.Add(iconLabel, 0, row);
-        grid.Controls.Add(nameLabel, 1, row);
-        grid.Controls.Add(value, 2, row);
-    }
-
-    private void StyleStatusLabel(Label label)
-    {
-        label.Dock = DockStyle.Fill;
-        label.TextAlign = ContentAlignment.MiddleLeft;
-        label.Margin = new Padding(0);
-        label.Font = new Font("Microsoft YaHei UI", 10F);
-        label.ForeColor = Color.FromArgb(75, 85, 99);
-    }
-
-    private void StyleValueLabel(Label label)
-    {
-        label.Dock = DockStyle.Fill;
-        label.TextAlign = ContentAlignment.MiddleLeft;
-        label.Margin = new Padding(0);
-        label.Font = new Font("Microsoft YaHei UI", 10F);
-        label.ForeColor = Color.FromArgb(82, 92, 108);
-    }
-
-    private void AddButton(Control parent, AppleButton button, string text, EventHandler handler)
+    private void AddButton(Control parent, Button button, string text, EventHandler handler)
     {
         button.Text = text;
-        button.IconKind = IconKindFor(text);
-        button.Primary = text == "启动";
-        button.Width = text.Length >= 7 ? 168 : 90;
-        button.Height = 44;
-        button.Margin = new Padding(0, 3, 4, 3);
+        button.AutoSize = true;
+        button.Height = 30;
         button.Click += handler;
         parent.Controls.Add(button);
-    }
-
-    private string IconKindFor(string text)
-    {
-        if (text == "一键安装") return "install";
-        if (text == "启动") return "start";
-        if (text == "重启") return "restart";
-        if (text == "停止") return "stop";
-        if (text == "检查 Harness 更新") return "update";
-        if (text == "打开页面") return "open";
-        if (text == "重新扫描") return "scan";
-        return "folder";
     }
 
     private string DefaultInstallRoot()
@@ -1553,343 +1494,5 @@ public static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new ManagerForm());
-    }
-}
-
-public sealed class AppleCardPanel : Panel
-{
-    public bool DrawRowSeparators { get; set; }
-
-    public AppleCardPanel()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint |
-            ControlStyles.OptimizedDoubleBuffer |
-            ControlStyles.ResizeRedraw |
-            ControlStyles.UserPaint |
-            ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-    }
-
-    protected override void OnPaintBackground(PaintEventArgs e)
-    {
-        Color outside = Parent == null ? Color.FromArgb(246, 247, 249) : Parent.BackColor;
-        e.Graphics.Clear(outside);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-
-        RectangleF shadowRect = new RectangleF(2, 3, Width - 5, Height - 6);
-        using (GraphicsPath shadowPath = UiDrawing.RoundedPath(shadowRect, 14F))
-        using (var shadow = new SolidBrush(Color.FromArgb(18, 20, 28, 40)))
-            e.Graphics.FillPath(shadow, shadowPath);
-
-        RectangleF cardRect = new RectangleF(1, 1, Width - 4, Height - 5);
-        using (GraphicsPath cardPath = UiDrawing.RoundedPath(cardRect, 14F))
-        using (var fill = new SolidBrush(Color.White))
-        using (var border = new Pen(Color.FromArgb(226, 229, 234), 1F))
-        {
-            e.Graphics.FillPath(fill, cardPath);
-            e.Graphics.DrawPath(border, cardPath);
-        }
-
-        if (DrawRowSeparators)
-        {
-            using (var divider = new Pen(Color.FromArgb(235, 237, 241), 1F))
-            {
-                float contentHeight = Height - Padding.Top - Padding.Bottom;
-                for (int i = 1; i < 4; i++)
-                {
-                    float y = Padding.Top + contentHeight * i / 4F;
-                    e.Graphics.DrawLine(divider, Padding.Left + 10, y, Width - Padding.Right - 10, y);
-                }
-            }
-        }
-    }
-}
-
-public sealed class StatusValueLabel : Label
-{
-    public StatusValueLabel()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint |
-            ControlStyles.OptimizedDoubleBuffer |
-            ControlStyles.ResizeRedraw |
-            ControlStyles.UserPaint |
-            ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-    }
-
-    protected override void OnTextChanged(EventArgs e)
-    {
-        base.OnTextChanged(e);
-        Invalidate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Color dot = StatusColor(Text);
-        float dotSize = 9F;
-        float dotY = (Height - dotSize) / 2F;
-        using (var brush = new SolidBrush(dot))
-            e.Graphics.FillEllipse(brush, 1F, dotY, dotSize, dotSize);
-
-        Color textColor = dot == Color.FromArgb(40, 184, 80)
-            ? Color.FromArgb(38, 165, 74)
-            : Color.FromArgb(103, 112, 128);
-        TextRenderer.DrawText(
-            e.Graphics,
-            Text ?? "",
-            Font,
-            new Rectangle(20, 0, Math.Max(0, Width - 20), Height),
-            textColor,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-    }
-
-    private Color StatusColor(string value)
-    {
-        string text = value ?? "";
-        if (text.Contains("正在运行") || text.Contains("已安装"))
-            return Color.FromArgb(40, 184, 80);
-        if (text.Contains("占用") || text.Contains("多个"))
-            return Color.FromArgb(245, 158, 11);
-        return Color.FromArgb(167, 174, 186);
-    }
-}
-
-public sealed class LineIconLabel : Control
-{
-    public string Kind { get; set; }
-
-    public LineIconLabel()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint |
-            ControlStyles.OptimizedDoubleBuffer |
-            ControlStyles.ResizeRedraw |
-            ControlStyles.UserPaint |
-            ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        int size = Math.Min(22, Math.Min(Width - 4, Height - 4));
-        Rectangle bounds = new Rectangle((Width - size) / 2, (Height - size) / 2, size, size);
-        UiDrawing.DrawIcon(e.Graphics, Kind, bounds, Color.FromArgb(126, 135, 148), 1.7F);
-    }
-}
-
-public sealed class AppleButton : Button
-{
-    private bool hovered;
-    private bool pressed;
-
-    public bool Primary { get; set; }
-    public string IconKind { get; set; }
-
-    public AppleButton()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint |
-            ControlStyles.OptimizedDoubleBuffer |
-            ControlStyles.ResizeRedraw |
-            ControlStyles.UserPaint, true);
-        FlatStyle = FlatStyle.Flat;
-        FlatAppearance.BorderSize = 0;
-        TabStop = false;
-        Cursor = Cursors.Hand;
-        Font = new Font("Microsoft YaHei UI", 9.5F);
-    }
-
-    protected override void OnMouseEnter(EventArgs e)
-    {
-        hovered = true;
-        Invalidate();
-        base.OnMouseEnter(e);
-    }
-
-    protected override void OnMouseLeave(EventArgs e)
-    {
-        hovered = false;
-        pressed = false;
-        Invalidate();
-        base.OnMouseLeave(e);
-    }
-
-    protected override void OnMouseDown(MouseEventArgs mevent)
-    {
-        pressed = true;
-        Invalidate();
-        base.OnMouseDown(mevent);
-    }
-
-    protected override void OnMouseUp(MouseEventArgs mevent)
-    {
-        pressed = false;
-        Invalidate();
-        base.OnMouseUp(mevent);
-    }
-
-    protected override void OnEnabledChanged(EventArgs e)
-    {
-        Cursor = Enabled ? Cursors.Hand : Cursors.Default;
-        Invalidate();
-        base.OnEnabledChanged(e);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Color outside = Parent == null ? Color.FromArgb(246, 247, 249) : Parent.BackColor;
-        e.Graphics.Clear(outside);
-
-        Color fill;
-        Color border;
-        Color content;
-        if (!Enabled)
-        {
-            fill = Color.FromArgb(241, 243, 246);
-            border = Color.FromArgb(235, 237, 241);
-            content = Color.FromArgb(171, 177, 187);
-        }
-        else if (Primary)
-        {
-            fill = pressed
-                ? Color.FromArgb(32, 82, 218)
-                : (hovered ? Color.FromArgb(55, 111, 246) : Color.FromArgb(42, 95, 230));
-            border = fill;
-            content = Color.White;
-        }
-        else
-        {
-            fill = pressed
-                ? Color.FromArgb(235, 238, 243)
-                : (hovered ? Color.FromArgb(250, 251, 252) : Color.White);
-            border = hovered ? Color.FromArgb(205, 211, 220) : Color.FromArgb(222, 226, 232);
-            content = Color.FromArgb(38, 43, 52);
-        }
-
-        RectangleF bounds = new RectangleF(1, 1, Width - 3, Height - 3);
-        using (GraphicsPath path = UiDrawing.RoundedPath(bounds, 10F))
-        using (var brush = new SolidBrush(fill))
-        using (var pen = new Pen(border, 1F))
-        {
-            e.Graphics.FillPath(brush, path);
-            e.Graphics.DrawPath(pen, path);
-        }
-
-        Size textSize = TextRenderer.MeasureText(e.Graphics, Text ?? "", Font, new Size(Int32.MaxValue, Height), TextFormatFlags.NoPadding);
-        int iconSize = 16;
-        int gap = 6;
-        int totalWidth = iconSize + gap + textSize.Width;
-        int startX = Math.Max(6, (Width - totalWidth) / 2);
-        Rectangle iconBounds = new Rectangle(startX, (Height - iconSize) / 2, iconSize, iconSize);
-        UiDrawing.DrawIcon(e.Graphics, IconKind, iconBounds, content, 1.8F);
-        TextRenderer.DrawText(
-            e.Graphics,
-            Text ?? "",
-            Font,
-            new Rectangle(startX + iconSize + gap, 0, Math.Max(0, Width - startX - iconSize - gap - 8), Height),
-            content,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-    }
-}
-
-public static class UiDrawing
-{
-    public static GraphicsPath RoundedPath(RectangleF rectangle, float radius)
-    {
-        float diameter = radius * 2F;
-        var path = new GraphicsPath();
-        path.AddArc(rectangle.Left, rectangle.Top, diameter, diameter, 180F, 90F);
-        path.AddArc(rectangle.Right - diameter, rectangle.Top, diameter, diameter, 270F, 90F);
-        path.AddArc(rectangle.Right - diameter, rectangle.Bottom - diameter, diameter, diameter, 0F, 90F);
-        path.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90F, 90F);
-        path.CloseFigure();
-        return path;
-    }
-
-    public static void DrawIcon(Graphics graphics, string kind, Rectangle bounds, Color color, float width)
-    {
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var pen = new Pen(color, width))
-        using (var brush = new SolidBrush(color))
-        {
-            pen.StartCap = LineCap.Round;
-            pen.EndCap = LineCap.Round;
-            float left = bounds.Left;
-            float top = bounds.Top;
-            float right = bounds.Right;
-            float bottom = bounds.Bottom;
-            float centerX = left + bounds.Width / 2F;
-            float centerY = top + bounds.Height / 2F;
-
-            if (kind == "start" || kind == "running")
-            {
-                PointF[] triangle =
-                {
-                    new PointF(left + bounds.Width * 0.35F, top + bounds.Height * 0.23F),
-                    new PointF(right - bounds.Width * 0.22F, centerY),
-                    new PointF(left + bounds.Width * 0.35F, bottom - bounds.Height * 0.23F)
-                };
-                if (kind == "running")
-                    graphics.DrawEllipse(pen, left + 1, top + 1, bounds.Width - 2, bounds.Height - 2);
-                graphics.FillPolygon(brush, triangle);
-                return;
-            }
-            if (kind == "stop")
-            {
-                using (GraphicsPath stopPath = RoundedPath(
-                    new RectangleF(left + bounds.Width * 0.25F, top + bounds.Height * 0.25F, bounds.Width * 0.5F, bounds.Height * 0.5F),
-                    2F))
-                    graphics.DrawPath(pen, stopPath);
-                return;
-            }
-            if (kind == "folder")
-            {
-                PointF[] folder =
-                {
-                    new PointF(left + 1, top + bounds.Height * 0.36F),
-                    new PointF(left + bounds.Width * 0.37F, top + bounds.Height * 0.36F),
-                    new PointF(left + bounds.Width * 0.46F, top + bounds.Height * 0.24F),
-                    new PointF(right - 1, top + bounds.Height * 0.24F),
-                    new PointF(right - 1, bottom - 2),
-                    new PointF(left + 1, bottom - 2)
-                };
-                graphics.DrawPolygon(pen, folder);
-                return;
-            }
-            if (kind == "install")
-            {
-                graphics.DrawLine(pen, centerX, top + 2, centerX, bottom - 6);
-                graphics.DrawLine(pen, centerX, bottom - 6, centerX - 4, bottom - 10);
-                graphics.DrawLine(pen, centerX, bottom - 6, centerX + 4, bottom - 10);
-                graphics.DrawLine(pen, left + 2, bottom - 2, right - 2, bottom - 2);
-                return;
-            }
-            if (kind == "open")
-            {
-                graphics.DrawRectangle(pen, left + 2, top + 5, bounds.Width - 8, bounds.Height - 7);
-                graphics.DrawLine(pen, centerX, centerY, right - 2, top + 2);
-                graphics.DrawLine(pen, right - 2, top + 2, right - 2, top + 8);
-                graphics.DrawLine(pen, right - 2, top + 2, right - 8, top + 2);
-                return;
-            }
-            if (kind == "status")
-            {
-                graphics.DrawEllipse(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4);
-                graphics.FillEllipse(brush, centerX - 2F, centerY - 2F, 4F, 4F);
-                return;
-            }
-            if (kind == "info")
-            {
-                graphics.DrawEllipse(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4);
-                graphics.DrawLine(pen, centerX, centerY - 1, centerX, bottom - 5);
-                graphics.FillEllipse(brush, centerX - 1F, top + 5F, 2F, 2F);
-                return;
-            }
-
-            graphics.DrawArc(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4, 35F, 285F);
-            graphics.DrawLine(pen, right - 2, centerY - 4, right - 2, centerY + 2);
-            graphics.DrawLine(pen, right - 2, centerY - 4, right - 8, centerY - 4);
-        }
     }
 }
