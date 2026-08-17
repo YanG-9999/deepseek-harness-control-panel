@@ -77,31 +77,27 @@ public sealed class ManagerForm : Form
         main.ColumnCount = 1;
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(main);
 
         main.Controls.Add(BuildStatusCard(), 0, 0);
 
-        var buttons = new TableLayoutPanel();
+        var buttons = new FlowLayoutPanel();
         buttons.Dock = DockStyle.Fill;
-        buttons.ColumnCount = 4;
-        buttons.RowCount = 2;
-        buttons.Padding = new Padding(0);
+        buttons.WrapContents = false;
+        buttons.AutoScroll = false;
+        buttons.Padding = new Padding(0, 2, 0, 2);
         buttons.BackColor = BackColor;
-        for (int i = 0; i < 4; i++)
-            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        AddButton(buttons, installButton, "一键安装", InstallClick, 0, 0);
-        AddButton(buttons, startButton, "启动", StartClick, 1, 0);
-        AddButton(buttons, restartButton, "重启", RestartClick, 2, 0);
-        AddButton(buttons, stopButton, "停止", StopClick, 3, 0);
-        AddButton(buttons, updateButton, "检查 Harness 更新", UpdateClick, 0, 1);
-        AddButton(buttons, openButton, "打开页面", OpenClick, 1, 1);
-        AddButton(buttons, rescanButton, "重新扫描", RescanClick, 2, 1);
-        AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick, 3, 1);
+        AddButton(buttons, installButton, "一键安装", InstallClick);
+        AddButton(buttons, startButton, "启动", StartClick);
+        AddButton(buttons, restartButton, "重启", RestartClick);
+        AddButton(buttons, stopButton, "停止", StopClick);
+        AddButton(buttons, updateButton, "检查 Harness 更新", UpdateClick);
+        AddButton(buttons, openButton, "打开页面", OpenClick);
+        AddButton(buttons, rescanButton, "重新扫描", RescanClick);
+        AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
         main.Controls.Add(buttons, 0, 2);
 
         var logCard = new AppleCardPanel();
@@ -196,19 +192,16 @@ public sealed class ManagerForm : Form
         label.ForeColor = Color.FromArgb(82, 92, 108);
     }
 
-    private void AddButton(TableLayoutPanel parent, AppleButton button, string text, EventHandler handler, int column, int row)
+    private void AddButton(Control parent, AppleButton button, string text, EventHandler handler)
     {
         button.Text = text;
         button.IconKind = IconKindFor(text);
         button.Primary = text == "启动";
-        button.Dock = DockStyle.Fill;
-        button.Margin = new Padding(
-            column == 0 ? 0 : 5,
-            row == 0 ? 0 : 5,
-            column == 3 ? 0 : 5,
-            row == 1 ? 0 : 5);
+        button.Width = text.Length >= 7 ? 168 : 90;
+        button.Height = 44;
+        button.Margin = new Padding(0, 3, 4, 3);
         button.Click += handler;
-        parent.Controls.Add(button, column, row);
+        parent.Controls.Add(button);
     }
 
     private string IconKindFor(string text)
@@ -1678,16 +1671,10 @@ public sealed class LineIconLabel : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        using (var iconFont = new Font("Segoe UI Symbol", 12F, FontStyle.Regular))
-        {
-            TextRenderer.DrawText(
-                e.Graphics,
-                UiDrawing.IconGlyph(Kind),
-                iconFont,
-                ClientRectangle,
-                Color.FromArgb(126, 135, 148),
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-        }
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        int size = Math.Min(22, Math.Min(Width - 4, Height - 4));
+        Rectangle bounds = new Rectangle((Width - size) / 2, (Height - size) / 2, size, size);
+        UiDrawing.DrawIcon(e.Graphics, Kind, bounds, Color.FromArgb(126, 135, 148), 1.7F);
     }
 }
 
@@ -1789,29 +1776,20 @@ public sealed class AppleButton : Button
             e.Graphics.DrawPath(pen, path);
         }
 
-        string glyph = UiDrawing.IconGlyph(IconKind);
-        using (var iconFont = new Font("Segoe UI Symbol", 10.5F, FontStyle.Regular))
-        {
-            Size glyphSize = TextRenderer.MeasureText(e.Graphics, glyph, iconFont, new Size(Int32.MaxValue, Height), TextFormatFlags.NoPadding);
-            Size textSize = TextRenderer.MeasureText(e.Graphics, Text ?? "", Font, new Size(Int32.MaxValue, Height), TextFormatFlags.NoPadding);
-            int gap = 7;
-            int totalWidth = glyphSize.Width + gap + textSize.Width;
-            int startX = Math.Max(10, (Width - totalWidth) / 2);
-            TextRenderer.DrawText(
-                e.Graphics,
-                glyph,
-                iconFont,
-                new Rectangle(startX, 0, glyphSize.Width, Height),
-                content,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(
-                e.Graphics,
-                Text ?? "",
-                Font,
-                new Rectangle(startX + glyphSize.Width + gap, 0, Math.Max(0, Width - startX - glyphSize.Width - gap - 10), Height),
-                content,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-        }
+        Size textSize = TextRenderer.MeasureText(e.Graphics, Text ?? "", Font, new Size(Int32.MaxValue, Height), TextFormatFlags.NoPadding);
+        int iconSize = 16;
+        int gap = 6;
+        int totalWidth = iconSize + gap + textSize.Width;
+        int startX = Math.Max(6, (Width - totalWidth) / 2);
+        Rectangle iconBounds = new Rectangle(startX, (Height - iconSize) / 2, iconSize, iconSize);
+        UiDrawing.DrawIcon(e.Graphics, IconKind, iconBounds, content, 1.8F);
+        TextRenderer.DrawText(
+            e.Graphics,
+            Text ?? "",
+            Font,
+            new Rectangle(startX + iconSize + gap, 0, Math.Max(0, Width - startX - iconSize - gap - 8), Height),
+            content,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
     }
 }
 
@@ -1829,19 +1807,89 @@ public static class UiDrawing
         return path;
     }
 
-    public static string IconGlyph(string kind)
+    public static void DrawIcon(Graphics graphics, string kind, Rectangle bounds, Color color, float width)
     {
-        if (kind == "install") return "⇩";
-        if (kind == "start") return "▶";
-        if (kind == "restart") return "↻";
-        if (kind == "stop") return "■";
-        if (kind == "update") return "⟳";
-        if (kind == "open") return "↗";
-        if (kind == "scan") return "◎";
-        if (kind == "folder") return "▱";
-        if (kind == "status") return "◉";
-        if (kind == "running") return "▷";
-        if (kind == "info") return "ⓘ";
-        return "•";
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var pen = new Pen(color, width))
+        using (var brush = new SolidBrush(color))
+        {
+            pen.StartCap = LineCap.Round;
+            pen.EndCap = LineCap.Round;
+            float left = bounds.Left;
+            float top = bounds.Top;
+            float right = bounds.Right;
+            float bottom = bounds.Bottom;
+            float centerX = left + bounds.Width / 2F;
+            float centerY = top + bounds.Height / 2F;
+
+            if (kind == "start" || kind == "running")
+            {
+                PointF[] triangle =
+                {
+                    new PointF(left + bounds.Width * 0.35F, top + bounds.Height * 0.23F),
+                    new PointF(right - bounds.Width * 0.22F, centerY),
+                    new PointF(left + bounds.Width * 0.35F, bottom - bounds.Height * 0.23F)
+                };
+                if (kind == "running")
+                    graphics.DrawEllipse(pen, left + 1, top + 1, bounds.Width - 2, bounds.Height - 2);
+                graphics.FillPolygon(brush, triangle);
+                return;
+            }
+            if (kind == "stop")
+            {
+                using (GraphicsPath stopPath = RoundedPath(
+                    new RectangleF(left + bounds.Width * 0.25F, top + bounds.Height * 0.25F, bounds.Width * 0.5F, bounds.Height * 0.5F),
+                    2F))
+                    graphics.DrawPath(pen, stopPath);
+                return;
+            }
+            if (kind == "folder")
+            {
+                PointF[] folder =
+                {
+                    new PointF(left + 1, top + bounds.Height * 0.36F),
+                    new PointF(left + bounds.Width * 0.37F, top + bounds.Height * 0.36F),
+                    new PointF(left + bounds.Width * 0.46F, top + bounds.Height * 0.24F),
+                    new PointF(right - 1, top + bounds.Height * 0.24F),
+                    new PointF(right - 1, bottom - 2),
+                    new PointF(left + 1, bottom - 2)
+                };
+                graphics.DrawPolygon(pen, folder);
+                return;
+            }
+            if (kind == "install")
+            {
+                graphics.DrawLine(pen, centerX, top + 2, centerX, bottom - 6);
+                graphics.DrawLine(pen, centerX, bottom - 6, centerX - 4, bottom - 10);
+                graphics.DrawLine(pen, centerX, bottom - 6, centerX + 4, bottom - 10);
+                graphics.DrawLine(pen, left + 2, bottom - 2, right - 2, bottom - 2);
+                return;
+            }
+            if (kind == "open")
+            {
+                graphics.DrawRectangle(pen, left + 2, top + 5, bounds.Width - 8, bounds.Height - 7);
+                graphics.DrawLine(pen, centerX, centerY, right - 2, top + 2);
+                graphics.DrawLine(pen, right - 2, top + 2, right - 2, top + 8);
+                graphics.DrawLine(pen, right - 2, top + 2, right - 8, top + 2);
+                return;
+            }
+            if (kind == "status")
+            {
+                graphics.DrawEllipse(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4);
+                graphics.FillEllipse(brush, centerX - 2F, centerY - 2F, 4F, 4F);
+                return;
+            }
+            if (kind == "info")
+            {
+                graphics.DrawEllipse(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4);
+                graphics.DrawLine(pen, centerX, centerY - 1, centerX, bottom - 5);
+                graphics.FillEllipse(brush, centerX - 1F, top + 5F, 2F, 2F);
+                return;
+            }
+
+            graphics.DrawArc(pen, left + 2, top + 2, bounds.Width - 4, bounds.Height - 4, 35F, 285F);
+            graphics.DrawLine(pen, right - 2, centerY - 4, right - 2, centerY + 2);
+            graphics.DrawLine(pen, right - 2, centerY - 4, right - 8, centerY - 4);
+        }
     }
 }
