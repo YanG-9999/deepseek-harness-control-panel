@@ -834,9 +834,7 @@ public sealed class ManagerForm : Form
         Directory.CreateDirectory(empty);
         try
         {
-            var psi = NewProcess("robocopy.exe", QuoteArgument(empty) + " " + QuoteArgument(path) + " /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0", Path.GetDirectoryName(path));
-            psi.RedirectStandardOutput = false;
-            psi.RedirectStandardError = false;
+            var psi = NewProcess("robocopy.exe", QuoteArgument(empty) + " " + QuoteArgument(path) + " /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0", Path.GetDirectoryName(path), false);
             int exitCode;
             using (var process = Process.Start(psi))
             {
@@ -1089,16 +1087,19 @@ public sealed class ManagerForm : Form
         return true;
     }
 
-    private ProcessStartInfo NewProcess(string file, string args, string workingDirectory)
+    private ProcessStartInfo NewProcess(string file, string args, string workingDirectory, bool redirectOutput = true)
     {
         var psi = new ProcessStartInfo(file, args);
         psi.WorkingDirectory = workingDirectory;
         psi.UseShellExecute = false;
         psi.CreateNoWindow = true;
-        psi.RedirectStandardOutput = true;
-        psi.RedirectStandardError = true;
-        psi.StandardOutputEncoding = Encoding.UTF8;
-        psi.StandardErrorEncoding = Encoding.UTF8;
+        psi.RedirectStandardOutput = redirectOutput;
+        psi.RedirectStandardError = redirectOutput;
+        if (redirectOutput)
+        {
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+        }
         try
         {
             string pathKey = psi.EnvironmentVariables.Keys.Cast<string>()
@@ -1115,9 +1116,7 @@ public sealed class ManagerForm : Form
 
     private void RunTool(string file, string args, string workingDirectory)
     {
-        var psi = NewProcess(file, args, workingDirectory);
-        psi.RedirectStandardOutput = false;
-        psi.RedirectStandardError = false;
+        var psi = NewProcess(file, args, workingDirectory, false);
         using (var p = Process.Start(psi))
         {
             p.WaitForExit();
