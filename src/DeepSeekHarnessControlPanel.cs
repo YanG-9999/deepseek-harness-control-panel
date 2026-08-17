@@ -197,7 +197,7 @@ public sealed class ManagerForm : Form
 
     private void StartClick(object sender, EventArgs e)
     {
-        RunAsync("正在启动 DeepSeek Harness", StartAsync);
+        RunAsync("正在启动 DeepSeek Harness", delegate { return StartAsync(true); });
     }
 
     private void RestartClick(object sender, EventArgs e)
@@ -205,7 +205,7 @@ public sealed class ManagerForm : Form
         RunAsync("正在重启 DeepSeek Harness", async delegate
         {
             await StopAsync();
-            await StartAsync();
+            await StartAsync(false);
         });
     }
 
@@ -457,7 +457,7 @@ public sealed class ManagerForm : Form
         }
     }
 
-    private async Task StartAsync()
+    private async Task StartAsync(bool openBrowser)
     {
         if (!IsInstalled())
             throw new InvalidOperationException("尚未安装 Harness，请先点击“一键安装”。");
@@ -467,7 +467,8 @@ public sealed class ManagerForm : Form
             if (owner > 0 && IsLikelyHarnessProcess(owner))
             {
                 Log("Harness 已经在运行。");
-                Process.Start("http://127.0.0.1:3080");
+                if (openBrowser)
+                    Process.Start("http://127.0.0.1:3080");
                 return;
             }
             throw new InvalidOperationException("3080 端口正被其他程序占用，请先释放端口后再启动 Harness。");
@@ -484,8 +485,9 @@ public sealed class ManagerForm : Form
         {
             if (IsPortOpen(3080))
             {
-                Log("Harness 已启动，浏览器页面已打开。");
-                Process.Start("http://127.0.0.1:3080");
+                Log(openBrowser ? "Harness 已启动，浏览器页面已打开。" : "Harness 已启动。");
+                if (openBrowser)
+                    Process.Start("http://127.0.0.1:3080");
                 return;
             }
             if (server.HasExited)
