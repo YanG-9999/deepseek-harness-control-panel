@@ -6,7 +6,9 @@ $app = Join-Path $projectRoot 'bin\DeepSeekHarnessControlPanel.exe'
 $testSources = @(
     (Join-Path $projectRoot 'tests\StopTargetResolverTests.cs'),
     (Join-Path $projectRoot 'tests\UninstallTargetPlannerTests.cs'),
-    (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs')
+    (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),
+    (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
+    (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs')
 )
 $testOutput = Join-Path $projectRoot 'bin\StopTargetResolverTests.exe'
 

@@ -6,6 +6,8 @@ public static class StopTargetResolverTests
     {
         ControlPanelLayoutTests.Run();
         UninstallTargetPlannerTests.Run();
+        LogLineFormatterTests.Run();
+        LogViewRenderingTests.Run();
 
         AssertResolution(
             StopTargetKind.None,

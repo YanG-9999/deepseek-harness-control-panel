@@ -92,6 +92,46 @@ public static class UninstallTargetPlanner
     }
 }
 
+public enum LogMessageKind
+{
+    Normal,
+    Command,
+    Warning,
+    Detail,
+    Error
+}
+
+public sealed class FormattedLogLine
+{
+    public string Text { get; private set; }
+    public LogMessageKind Kind { get; private set; }
+
+    public FormattedLogLine(string text, LogMessageKind kind)
+    {
+        Text = text;
+        Kind = kind;
+    }
+}
+
+public static class LogLineFormatter
+{
+    public static FormattedLogLine Format(string message)
+    {
+        string text = (message ?? "").Trim();
+        if (text.StartsWith("(!)", StringComparison.Ordinal))
+            return new FormattedLogLine("警告：" + text.Substring(3).TrimStart(), LogMessageKind.Warning);
+        if (text.StartsWith("-", StringComparison.Ordinal))
+            return new FormattedLogLine("    · " + text.Substring(1).TrimStart(), LogMessageKind.Detail);
+        if (text.StartsWith("#", StringComparison.Ordinal))
+            return new FormattedLogLine("信息：" + text.Substring(1).TrimStart(), LogMessageKind.Normal);
+        if (text.StartsWith(">", StringComparison.Ordinal))
+            return new FormattedLogLine("执行：" + text.Substring(1).TrimStart(), LogMessageKind.Command);
+        if (text.StartsWith("ERROR", StringComparison.OrdinalIgnoreCase) || text.StartsWith("Error:", StringComparison.OrdinalIgnoreCase))
+            return new FormattedLogLine("错误：" + text, LogMessageKind.Error);
+        return new FormattedLogLine(text, LogMessageKind.Normal);
+    }
+}
+
 public sealed class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
@@ -104,7 +144,7 @@ public sealed class ManagerForm : Form
     private readonly Label statusLabel = new Label();
     private readonly Label runningLabel = new Label();
     private readonly Label versionLabel = new Label();
-    private readonly TextBox logBox = new TextBox();
+    private readonly RichTextBox logBox = new RichTextBox();
     private readonly Button installButton = new Button();
     private readonly Button startButton = new Button();
     private readonly Button restartButton = new Button();
@@ -219,9 +259,10 @@ public sealed class ManagerForm : Form
         AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
         main.Controls.Add(buttons, 0, 4);
 
-        logBox.Multiline = true;
         logBox.ReadOnly = true;
-        logBox.ScrollBars = ScrollBars.Vertical;
+        logBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+        logBox.WordWrap = true;
+        logBox.HideSelection = false;
         logBox.Dock = DockStyle.Fill;
         logBox.BackColor = Color.White;
         main.Controls.Add(logBox, 0, 5);
@@ -458,7 +499,37 @@ public sealed class ManagerForm : Form
             BeginInvoke((Action)delegate { Log(message); });
             return;
         }
-        logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + StripAnsiSequences(message) + Environment.NewLine);
+        string clean = StripAnsiSequences(message);
+        string[] lines = clean.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        foreach (string line in lines)
+        {
+            if (String.IsNullOrWhiteSpace(line))
+                continue;
+            FormattedLogLine formatted = LogLineFormatter.Format(line);
+            logBox.SelectionStart = logBox.TextLength;
+            logBox.SelectionLength = 0;
+            logBox.SelectionColor = LogColor(formatted.Kind);
+            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + formatted.Text + Environment.NewLine);
+        }
+        logBox.SelectionColor = logBox.ForeColor;
+        logBox.ScrollToCaret();
+    }
+
+    private static Color LogColor(LogMessageKind kind)
+    {
+        switch (kind)
+        {
+            case LogMessageKind.Warning:
+                return Color.DarkOrange;
+            case LogMessageKind.Error:
+                return Color.Firebrick;
+            case LogMessageKind.Command:
+                return Color.DimGray;
+            case LogMessageKind.Detail:
+                return Color.DimGray;
+            default:
+                return Color.Black;
+        }
     }
 
     private static string StripAnsiSequences(string message)
