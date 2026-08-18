@@ -4,6 +4,8 @@ public static class StopTargetResolverTests
 {
     public static int Main()
     {
+        UninstallTargetPlannerTests.Run();
+
         AssertResolution(
             StopTargetKind.None,
             0,

@@ -56,6 +56,42 @@ public static class StopTargetResolver
     }
 }
 
+public sealed class UninstallTarget
+{
+    public string Path { get; private set; }
+    public string Description { get; private set; }
+
+    public UninstallTarget(string path, string description)
+    {
+        Path = path;
+        Description = description;
+    }
+}
+
+public static class UninstallTargetPlanner
+{
+    public static List<UninstallTarget> BuildTargets(
+        string installRoot,
+        string harnessHome,
+        string settingsDirectory)
+    {
+        var targets = new List<UninstallTarget>();
+        AddTarget(targets, installRoot, "Harness 安装目录（其中的专用 Node/pnpm 如存在会一并删除）");
+        AddTarget(targets, harnessHome, "Harness 用户数据（配置、API Key、会话和附件）");
+        AddTarget(targets, settingsDirectory, "控制面板配置");
+        return targets;
+    }
+
+    private static void AddTarget(List<UninstallTarget> targets, string path, string description)
+    {
+        if (String.IsNullOrWhiteSpace(path))
+            return;
+        string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
+        if (!targets.Any(target => String.Equals(target.Path, full, StringComparison.OrdinalIgnoreCase)))
+            targets.Add(new UninstallTarget(full, description));
+    }
+}
+
 public sealed class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
@@ -77,6 +113,7 @@ public sealed class ManagerForm : Form
     private readonly Button openButton = new Button();
     private readonly Button rescanButton = new Button();
     private readonly Button openFolderButton = new Button();
+    private readonly Button uninstallButton = new Button();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -171,6 +208,7 @@ public sealed class ManagerForm : Form
         buttons.WrapContents = false;
         buttons.AutoScroll = true;
         AddButton(buttons, installButton, "一键安装", InstallClick);
+        AddButton(buttons, uninstallButton, "彻底卸载", UninstallClick);
         AddButton(buttons, startButton, "启动", StartClick);
         AddButton(buttons, restartButton, "重启", RestartClick);
         AddButton(buttons, stopButton, "停止", StopClick);
@@ -296,6 +334,38 @@ public sealed class ManagerForm : Form
             Process.Start("explorer.exe", "\"" + Root + "\"");
     }
 
+    private void UninstallClick(object sender, EventArgs e)
+    {
+        if (!IsInstalled())
+            return;
+        string summary = BuildUninstallSummary();
+        string warning = "此操作不可恢复，将彻底删除 DeepSeek Harness。" +
+            Environment.NewLine + Environment.NewLine +
+            summary +
+            Environment.NewLine + Environment.NewLine +
+            "系统全局 Node、npm、pnpm 和其他项目不会被删除。" +
+            Environment.NewLine + Environment.NewLine +
+            "确定继续吗？";
+        if (Ask(warning, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        RunAsync("正在彻底卸载 DeepSeek Harness", UninstallAsync);
+    }
+
+    private string BuildUninstallSummary()
+    {
+        var lines = new List<string>();
+        foreach (UninstallTarget target in GetUninstallTargets())
+            lines.Add("将删除：" + target.Description + Environment.NewLine + "  " + target.Path);
+        return String.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    private List<UninstallTarget> GetUninstallTargets()
+    {
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string harnessHome = Path.Combine(userProfile, ".dsh");
+        return UninstallTargetPlanner.BuildTargets(Root, harnessHome, SettingsDirectory);
+    }
+
     private bool ChooseInstallRoot()
     {
         using (var dialog = new FolderBrowserDialog())
@@ -377,6 +447,7 @@ public sealed class ManagerForm : Form
         openButton.Enabled = enabled && running;
         rescanButton.Enabled = enabled;
         openFolderButton.Enabled = enabled && Directory.Exists(Root);
+        uninstallButton.Enabled = enabled && installed && !multiple;
     }
 
     private void Log(string message)
@@ -491,6 +562,70 @@ public sealed class ManagerForm : Form
                 TryDeleteDirectory(installRoot);
             throw;
         }
+    }
+
+    private async Task UninstallAsync()
+    {
+        await StopAsync();
+        var failures = new List<string>();
+        foreach (UninstallTarget target in GetUninstallTargets())
+        {
+            if (!IsSafeUninstallTarget(target.Path))
+            {
+                failures.Add(target.Path + "（安全检查拒绝删除）");
+                continue;
+            }
+            if (!Directory.Exists(target.Path) && !File.Exists(target.Path))
+            {
+                Log("目标不存在，跳过: " + target.Path);
+                continue;
+            }
+            try
+            {
+                Log("正在删除: " + target.Path);
+                if (Directory.Exists(target.Path))
+                    DeleteDirectoryTree(target.Path);
+                else
+                    File.Delete(target.Path);
+                Log("已删除: " + target.Path);
+            }
+            catch (Exception error)
+            {
+                failures.Add(target.Path + "（" + error.Message + "）");
+            }
+        }
+
+        if (failures.Count > 0)
+            throw new InvalidOperationException(
+                "卸载未完全完成，以下目标删除失败:" + Environment.NewLine +
+                String.Join(Environment.NewLine, failures.ToArray()));
+
+        pathBox.Text = "";
+        Log("已彻底删除 Harness、用户数据、控制面板配置及 Harness 专用 Node/pnpm。");
+    }
+
+    private bool IsSafeUninstallTarget(string target)
+    {
+        if (String.IsNullOrWhiteSpace(target))
+            return false;
+        string full = Path.GetFullPath(target).TrimEnd('\\');
+        string driveRoot = (Path.GetPathRoot(full) ?? "").TrimEnd('\\');
+        if (String.IsNullOrEmpty(full) || String.Equals(full, driveRoot, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\');
+        string expectedHome = Path.Combine(userProfile, ".dsh").TrimEnd('\\');
+        string expectedSettings = SettingsDirectory.TrimEnd('\\');
+        if (String.Equals(full, expectedHome, StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(full, expectedSettings, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string configuredRoot = Root;
+        if (!String.IsNullOrWhiteSpace(configuredRoot) &&
+            String.Equals(full, Path.GetFullPath(configuredRoot).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+            IsSourceAt(full))
+            return true;
+        return false;
     }
 
     private async Task StartAsync(bool openBrowser)
