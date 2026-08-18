@@ -16,6 +16,46 @@ using System.Web.Script.Serialization;
 using System.Management;
 using Microsoft.Win32;
 
+public enum StopTargetKind
+{
+    None,
+    HarnessProcess,
+    ForeignPort
+}
+
+public sealed class StopResolution
+{
+    public StopTargetKind Kind { get; private set; }
+    public int ProcessId { get; private set; }
+
+    public StopResolution(StopTargetKind kind, int processId)
+    {
+        Kind = kind;
+        ProcessId = processId;
+    }
+}
+
+public static class StopTargetResolver
+{
+    public static StopResolution Resolve(
+        int recordedPid,
+        int portPid,
+        bool recordedPidAlive,
+        bool recordedPidIsHarness,
+        bool portPidIsHarness)
+    {
+        if (portPid > 0)
+        {
+            return portPidIsHarness
+                ? new StopResolution(StopTargetKind.HarnessProcess, portPid)
+                : new StopResolution(StopTargetKind.ForeignPort, 0);
+        }
+        if (recordedPid > 0 && recordedPidAlive && recordedPidIsHarness)
+            return new StopResolution(StopTargetKind.HarnessProcess, recordedPid);
+        return new StopResolution(StopTargetKind.None, 0);
+    }
+}
+
 public sealed class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
@@ -497,19 +537,27 @@ public sealed class ManagerForm : Form
 
     private async Task StopAsync()
     {
-        int pid = ParseInt(ReadStateValue("pid"));
+        int recordedPid = ParseInt(ReadStateValue("pid"));
         int portPid = FindPortOwner(3080);
-        if (portPid > 0)
+        bool recordedAlive = recordedPid > 0 && IsProcessAlive(recordedPid);
+        bool recordedIsHarness = recordedAlive && IsLikelyHarnessProcess(recordedPid);
+        bool portIsHarness = portPid > 0 && IsLikelyHarnessProcess(portPid);
+        StopResolution resolution = StopTargetResolver.Resolve(
+            recordedPid,
+            portPid,
+            recordedAlive,
+            recordedIsHarness,
+            portIsHarness);
+
+        if (resolution.Kind == StopTargetKind.ForeignPort)
         {
-            if (pid <= 0 || !IsProcessAlive(pid))
-                pid = portPid;
-        }
-        if (pid > 0)
-        {
-            string commandLine = GetProcessCommandLine(pid);
+            string commandLine = GetProcessCommandLine(portPid);
             string detail = String.IsNullOrEmpty(commandLine) ? "" : Environment.NewLine + commandLine;
-            if (portPid > 0 && !IsLikelyHarnessProcess(pid))
-                throw new InvalidOperationException("3080 端口由其他程序占用，管理器不会结束该进程。" + detail);
+            throw new InvalidOperationException("3080 端口由其他程序占用，管理器不会结束该进程。" + detail);
+        }
+        if (resolution.Kind == StopTargetKind.HarnessProcess)
+        {
+            int pid = resolution.ProcessId;
             RunTool("taskkill.exe", "/PID " + pid + " /T /F", Root);
             WriteState(ReadStateValue("commit"), "");
             for (int i = 0; i < 20 && IsPortOpen(3080); i++)
@@ -518,12 +566,10 @@ public sealed class ManagerForm : Form
                 throw new InvalidOperationException("进程已结束，但 3080 端口仍被占用。");
             Log("已停止 Harness 进程树并释放 3080 端口。");
         }
-        else if (IsPortOpen(3080))
-        {
-            throw new InvalidOperationException("无法识别 3080 端口的占用进程。");
-        }
         else
         {
+            if (recordedPid > 0)
+                WriteState(ReadStateValue("commit"), "");
             Log("Harness 当前未运行。");
         }
     }
@@ -1435,12 +1481,9 @@ public sealed class ManagerForm : Form
 
     private bool IsLikelyHarnessProcess(int pid)
     {
-        int managedPid = ParseInt(ReadStateValue("pid"));
         int current = pid;
         for (int depth = 0; depth < 8 && current > 0; depth++)
         {
-            if (managedPid > 0 && current == managedPid)
-                return true;
             string commandLine = GetProcessCommandLine(current).ToLowerInvariant();
             if (commandLine.Contains("deepseek-harness") ||
                 (commandLine.Contains("apps/cli/src/bin.ts") && commandLine.Contains("web")) ||
