@@ -4,6 +4,7 @@ public static class StopTargetResolverTests
 {
     public static int Main()
     {
+        ControlPanelLayoutTests.Run();
         UninstallTargetPlannerTests.Run();
 
         AssertResolution(

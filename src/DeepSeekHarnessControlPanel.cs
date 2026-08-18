@@ -153,7 +153,7 @@ public sealed class ManagerForm : Form
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(main);
 
@@ -205,8 +205,9 @@ public sealed class ManagerForm : Form
 
         var buttons = new FlowLayoutPanel();
         buttons.Dock = DockStyle.Fill;
-        buttons.WrapContents = false;
-        buttons.AutoScroll = true;
+        buttons.WrapContents = true;
+        buttons.AutoScroll = false;
+        buttons.FlowDirection = FlowDirection.LeftToRight;
         AddButton(buttons, installButton, "一键安装", InstallClick);
         AddButton(buttons, uninstallButton, "彻底卸载", UninstallClick);
         AddButton(buttons, startButton, "启动", StartClick);
