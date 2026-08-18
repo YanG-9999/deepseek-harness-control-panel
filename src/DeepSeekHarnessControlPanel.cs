@@ -132,6 +132,30 @@ public static class LogLineFormatter
     }
 }
 
+public static class HarnessInstallationValidator
+{
+    public static readonly string[] RequiredFiles = new[]
+    {
+        "package.json",
+        "pnpm-workspace.yaml",
+        "apps/cli/package.json",
+        "apps/cli/src/bin.ts",
+        "packages/session-query/tool-session-query/package.json",
+        "packages/session-query/tool-session-query/src/index.ts"
+    };
+
+    public static List<string> FindMissingFiles(Func<string, bool> fileExists)
+    {
+        var missing = new List<string>();
+        foreach (string relativePath in RequiredFiles)
+        {
+            if (!fileExists(relativePath))
+                missing.Add(relativePath);
+        }
+        return missing;
+    }
+}
+
 public sealed class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
@@ -315,6 +339,15 @@ public sealed class ManagerForm : Form
 
     private void InstallClick(object sender, EventArgs e)
     {
+        if (IsInstalled() && !IsInstallationReady())
+        {
+            string prompt = "检测到当前 Harness 安装不完整，无法启动。" + Environment.NewLine +
+                "将重新下载官方源码并修复安装，保留 Harness 专用运行环境、日志和你的用户配置。" + Environment.NewLine +
+                "确定开始修复吗？";
+            if (Ask(prompt, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                RunAsync("正在修复 DeepSeek Harness", RepairAsync);
+            return;
+        }
         if (!ChooseInstallRoot())
             return;
         RunAsync("正在安装 DeepSeek Harness", InstallAsync);
@@ -358,6 +391,13 @@ public sealed class ManagerForm : Form
         }
         else if (discoveredRoots.Count == 1)
         {
+            if (!IsInstallationReady())
+            {
+                Log("重新扫描完成：安装不完整，需要修复。");
+                foreach (string path in MissingInstallationFiles())
+                    Log("缺少文件: " + path);
+                return;
+            }
             Log("重新扫描完成：已安装。");
             Log("安装目录: " + discoveredRoots[0]);
             Log("版本: " + LocalVersion());
@@ -477,15 +517,17 @@ public sealed class ManagerForm : Form
     private void SetButtons(bool enabled)
     {
         bool installed = IsInstalled();
+        bool ready = installed && IsInstallationReady();
         int portPid = FindPortOwner(3080);
         bool portBusy = IsPortOpen(3080);
         bool running = portBusy && portPid > 0 && IsLikelyHarnessProcess(portPid);
         bool multiple = discoveredRoots.Count > 1;
-        installButton.Enabled = enabled && !installed && !multiple;
-        startButton.Enabled = enabled && installed && !portBusy && !multiple;
-        restartButton.Enabled = enabled && installed && running && !multiple;
+        installButton.Text = installed && !ready ? "修复安装" : "一键安装";
+        installButton.Enabled = enabled && (!installed || !ready) && !multiple;
+        startButton.Enabled = enabled && ready && !portBusy && !multiple;
+        restartButton.Enabled = enabled && ready && running && !multiple;
         stopButton.Enabled = enabled && running && !multiple;
-        updateButton.Enabled = enabled && installed && !multiple;
+        updateButton.Enabled = enabled && ready && !multiple;
         openButton.Enabled = enabled && running;
         rescanButton.Enabled = enabled;
         openFolderButton.Enabled = enabled && Directory.Exists(Root);
@@ -548,6 +590,7 @@ public sealed class ManagerForm : Form
         if (multiple && !discoveredRoots.Contains(Root, StringComparer.OrdinalIgnoreCase))
             pathBox.Text = discoveredRoots[0];
         bool installed = IsInstalled();
+        bool ready = installed && IsInstallationReady();
         if (installed && !IsConfiguredRoot())
             SaveConfiguredRoot(Root);
         int portPid = FindPortOwner(3080);
@@ -558,6 +601,12 @@ public sealed class ManagerForm : Form
             statusLabel.Text = "发现多个安装";
             runningLabel.Text = running ? "正在运行" : (portBusy ? "端口被其他程序占用" : "未运行");
             versionLabel.Text = "";
+        }
+        else if (installed && !ready)
+        {
+            statusLabel.Text = "安装不完整（需要修复）";
+            runningLabel.Text = "未运行";
+            versionLabel.Text = LocalVersion();
         }
         else if (installed && running)
         {
@@ -623,6 +672,7 @@ public sealed class ManagerForm : Form
             await PreparePnpmAsync();
             await RunToolAsync("pnpm install", "install");
             await RunToolAsync("pnpm run build", "build");
+            await VerifyRunnableInstallationAsync();
             WriteState(commit);
             SaveConfiguredRoot(installRoot);
             Log("安装位置: " + installRoot);
@@ -634,6 +684,17 @@ public sealed class ManagerForm : Form
                 TryDeleteDirectory(installRoot);
             throw;
         }
+    }
+
+    private async Task RepairAsync()
+    {
+        if (!IsInstalled())
+            throw new InvalidOperationException("未检测到可修复的 Harness 安装。");
+        if (IsInstallationReady())
+            throw new InvalidOperationException("Harness 安装完整，无需修复。");
+        string branch = await GetDefaultBranchAsync();
+        string remote = await GetRemoteCommitAsync(branch);
+        await ApplyUpdateAsync(remote);
     }
 
     private async Task UninstallAsync()
@@ -704,6 +765,8 @@ public sealed class ManagerForm : Form
     {
         if (!IsInstalled())
             throw new InvalidOperationException("尚未安装 Harness，请先点击“一键安装”。");
+        if (!IsInstallationReady())
+            throw new InvalidOperationException("Harness 安装不完整，请点击“修复安装”恢复缺失的官方文件。");
         await EnsureNodeAsync();
         await PreparePnpmAsync();
         if (IsPortOpen(3080))
@@ -819,6 +882,7 @@ public sealed class ManagerForm : Form
             await PreparePnpmAsync();
             await RunToolAsync("pnpm install", "update-install");
             await RunToolAsync("pnpm run build", "update-build");
+            await VerifyRunnableInstallationAsync();
             WriteState(remote);
             Log("新版本已构建完成，正在清理旧版本备份...");
             try
@@ -994,8 +1058,25 @@ public sealed class ManagerForm : Form
         string root = Directory.GetDirectories(extract)[0];
         if (Directory.Exists(destination)) Directory.Delete(destination, true);
         CopyDirectory(root, destination);
+        EnsureSourceTreeComplete(destination);
         Directory.Delete(extract, true);
         return await GetRemoteCommitAsync(branch);
+    }
+
+    private void EnsureSourceTreeComplete(string root)
+    {
+        List<string> missing = MissingInstallationFiles(root);
+        if (missing.Count == 0)
+            return;
+        throw new InvalidOperationException("官方源码下载不完整，缺少: " + String.Join("、", missing.ToArray()));
+    }
+
+    private async Task VerifyRunnableInstallationAsync()
+    {
+        EnsureSourceTreeComplete(Root);
+        Log("正在验证 Harness 运行依赖...");
+        await RunToolAsync("pnpm dsh web --help", "verify");
+        Log("Harness 运行依赖验证通过。");
     }
 
     private void CopyDirectory(string source, string destination)
@@ -1547,6 +1628,22 @@ public sealed class ManagerForm : Form
     private bool IsInstalled()
     {
         return IsSourceAt(Root);
+    }
+
+    private bool IsInstallationReady()
+    {
+        return IsInstalled() && MissingInstallationFiles().Count == 0;
+    }
+
+    private List<string> MissingInstallationFiles()
+    {
+        return MissingInstallationFiles(Root);
+    }
+
+    private static List<string> MissingInstallationFiles(string root)
+    {
+        return HarnessInstallationValidator.FindMissingFiles(relativePath =>
+            File.Exists(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar))));
     }
 
     private bool IsSourceAt(string root)

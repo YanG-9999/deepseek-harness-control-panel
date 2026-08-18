@@ -8,7 +8,8 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\UninstallTargetPlannerTests.cs'),
     (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),
     (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
-    (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs')
+    (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs'),
+    (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs')
 )
 $testOutput = Join-Path $projectRoot 'bin\StopTargetResolverTests.exe'
 

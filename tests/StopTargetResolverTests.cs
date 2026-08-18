@@ -8,6 +8,7 @@ public static class StopTargetResolverTests
         UninstallTargetPlannerTests.Run();
         LogLineFormatterTests.Run();
         LogViewRenderingTests.Run();
+        HarnessInstallationValidatorTests.Run();
 
         AssertResolution(
             StopTargetKind.None,
