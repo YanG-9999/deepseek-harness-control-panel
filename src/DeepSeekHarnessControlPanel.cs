@@ -156,6 +156,28 @@ public static class HarnessInstallationValidator
     }
 }
 
+public static class BuildRetryPolicy
+{
+    public static bool ShouldRetry(string command, int attempt)
+    {
+        return String.Equals(command, "pnpm run build", StringComparison.OrdinalIgnoreCase) && attempt == 1;
+    }
+}
+
+public sealed class ProcessExecutionResult
+{
+    public int ExitCode { get; private set; }
+    public string StandardOutput { get; private set; }
+    public string StandardError { get; private set; }
+
+    public ProcessExecutionResult(int exitCode, string standardOutput, string standardError)
+    {
+        ExitCode = exitCode;
+        StandardOutput = standardOutput ?? "";
+        StandardError = standardError ?? "";
+    }
+}
+
 public sealed class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
@@ -1277,42 +1299,86 @@ public sealed class ManagerForm : Form
 
     private async Task RunToolAsync(string command, string logName, string workingDirectory)
     {
-        Log("> " + command);
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            Log("> " + command + (attempt == 1 ? "" : "（第 2 次尝试）"));
+            ProcessStartInfo psi = NewToolProcess(command, workingDirectory);
+            ProcessExecutionResult result = await RunProcessDetailedAsync(psi);
+            if (result.ExitCode == 0)
+                return;
+
+            if (BuildRetryPolicy.ShouldRetry(command, attempt))
+            {
+                Log("构建第一次失败，正在自动重试；这通常是首次生成依赖或缓存并发造成的临时错误。");
+                await Task.Delay(1000);
+                continue;
+            }
+
+            string detail = LastOutputLines(result.StandardError, 30);
+            if (String.IsNullOrWhiteSpace(detail))
+                detail = LastOutputLines(result.StandardOutput, 30);
+            if (!String.IsNullOrWhiteSpace(detail))
+                Log("命令失败的最后输出：" + Environment.NewLine + detail);
+            throw new InvalidOperationException(command + " 失败，退出码 " + result.ExitCode + "。");
+        }
+    }
+
+    private async Task<int> RunProcessAsync(ProcessStartInfo psi)
+    {
+        ProcessExecutionResult result = await RunProcessDetailedAsync(psi);
+        return result.ExitCode;
+    }
+
+    private async Task<ProcessExecutionResult> RunProcessDetailedAsync(ProcessStartInfo psi)
+    {
+        var process = new Process { StartInfo = psi };
+        var standardOutput = new StringBuilder();
+        var standardError = new StringBuilder();
+        process.Start();
+        Task output = Task.Run(async delegate
+        {
+            string line;
+            while ((line = await process.StandardOutput.ReadLineAsync()) != null)
+            {
+                standardOutput.AppendLine(line);
+                Log(line);
+            }
+        });
+        Task error = Task.Run(async delegate
+        {
+            string line;
+            while ((line = await process.StandardError.ReadLineAsync()) != null)
+            {
+                standardError.AppendLine(line);
+                Log(line);
+            }
+        });
+        await Task.Run(delegate { process.WaitForExit(); });
+        await Task.WhenAll(output, error);
+        return new ProcessExecutionResult(process.ExitCode, standardOutput.ToString(), standardError.ToString());
+    }
+
+    private ProcessStartInfo NewToolProcess(string command, string workingDirectory)
+    {
         string[] parts = command.Split(new[] { ' ' }, 2);
-        ProcessStartInfo psi;
         if (parts[0] == "corepack")
         {
             string corepack = FindExecutable("corepack.cmd");
             if (String.IsNullOrEmpty(corepack))
                 throw new InvalidOperationException("未找到 Corepack。");
-            psi = NewProcess(corepack, parts[1], workingDirectory);
+            return NewProcess(corepack, parts[1], workingDirectory);
         }
-        else
-        {
-            psi = NewPnpmProcess(command.Substring(5), workingDirectory);
-        }
-        int code = await RunProcessAsync(psi);
-        if (code != 0)
-            throw new InvalidOperationException(command + " 失败，退出码 " + code + "。");
+        return NewPnpmProcess(command.Substring(5), workingDirectory);
     }
 
-    private async Task<int> RunProcessAsync(ProcessStartInfo psi)
+    private static string LastOutputLines(string output, int count)
     {
-        var process = new Process { StartInfo = psi };
-        process.Start();
-        Task output = Task.Run(async delegate
-        {
-            string line;
-            while ((line = await process.StandardOutput.ReadLineAsync()) != null) Log(line);
-        });
-        Task error = Task.Run(async delegate
-        {
-            string line;
-            while ((line = await process.StandardError.ReadLineAsync()) != null) Log(line);
-        });
-        await Task.Run(delegate { process.WaitForExit(); });
-        await Task.WhenAll(output, error);
-        return process.ExitCode;
+        if (String.IsNullOrWhiteSpace(output))
+            return "";
+        string[] lines = output.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        int start = Math.Max(0, lines.Length - count);
+        return String.Join(Environment.NewLine, lines.Skip(start).ToArray());
     }
 
     private ProcessStartInfo NewPnpmProcess(string args, string workingDirectory)
