@@ -164,6 +164,18 @@ public static class BuildRetryPolicy
     }
 }
 
+public static class BuildCommitEnvironment
+{
+    public const string VariableName = "DSH_CLIENT_COMMIT_HASH";
+
+    public static void Apply(ProcessStartInfo process, string commit)
+    {
+        if (process == null || String.IsNullOrWhiteSpace(commit))
+            return;
+        process.EnvironmentVariables[VariableName] = commit.Trim();
+    }
+}
+
 public sealed class ProcessExecutionResult
 {
     public int ExitCode { get; private set; }
@@ -208,6 +220,7 @@ public sealed class ManagerForm : Form
     private string selectedNodeDirectory = "";
     private string selectedPnpm = "";
     private string selectedCorepack = "";
+    private string selectedSourceCommit = "";
 
     public ManagerForm()
     {
@@ -689,6 +702,7 @@ public sealed class ManagerForm : Form
             }
             Directory.Move(stage, installRoot);
             ownsInstallRoot = true;
+            selectedSourceCommit = commit;
             Directory.CreateDirectory(Path.Combine(installRoot, "logs"));
             await EnsureNodeAsync();
             await PreparePnpmAsync();
@@ -789,6 +803,7 @@ public sealed class ManagerForm : Form
             throw new InvalidOperationException("尚未安装 Harness，请先点击“一键安装”。");
         if (!IsInstallationReady())
             throw new InvalidOperationException("Harness 安装不完整，请点击“修复安装”恢复缺失的官方文件。");
+        selectedSourceCommit = LocalCommit();
         await EnsureNodeAsync();
         await PreparePnpmAsync();
         if (IsPortOpen(3080))
@@ -900,6 +915,7 @@ public sealed class ManagerForm : Form
             Directory.Move(stage, Root);
             CopyPersistentDirectory(backup, Root, ".dsh-runtime");
             CopyPersistentDirectory(backup, Root, "logs");
+            selectedSourceCommit = remote;
             await EnsureNodeAsync();
             await PreparePnpmAsync();
             await RunToolAsync("pnpm install", "update-install");
@@ -933,6 +949,7 @@ public sealed class ManagerForm : Form
                 Directory.Move(backup, Root);
             if (Directory.Exists(Root) && cleanupError != null)
                 throw new InvalidOperationException("更新失败，自动回滚也未能完成。旧版本备份保留在: " + backup + Environment.NewLine + cleanupError.Message, updateError);
+            selectedSourceCommit = ReadStateValue("commit");
             throw;
         }
         finally
@@ -1506,6 +1523,7 @@ public sealed class ManagerForm : Form
                 .FirstOrDefault(key => String.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)) ?? "PATH";
             string nodePath = String.IsNullOrEmpty(selectedNodeDirectory) ? Runtime : selectedNodeDirectory;
             psi.EnvironmentVariables[pathKey] = nodePath + ";" + Environment.GetEnvironmentVariable("PATH");
+            BuildCommitEnvironment.Apply(psi, selectedSourceCommit);
         }
         catch (ArgumentException)
         {

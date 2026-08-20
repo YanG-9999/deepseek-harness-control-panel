@@ -24,5 +24,11 @@ public static class HarnessInstallationValidatorTests
             throw new InvalidOperationException("The Harness build should not retry more than once.");
         if (BuildRetryPolicy.ShouldRetry("pnpm install", 1))
             throw new InvalidOperationException("Non-build commands should not use the build retry policy.");
+
+        var process = new System.Diagnostics.ProcessStartInfo();
+        BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");
+        string commit = process.EnvironmentVariables["DSH_CLIENT_COMMIT_HASH"];
+        if (commit != "141eb6fef83422698aef7a981029e843e8161534")
+            throw new InvalidOperationException("The official source commit was not passed to the build environment.");
     }
 }
