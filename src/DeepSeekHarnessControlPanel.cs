@@ -176,6 +176,13 @@ public static class BuildCommitEnvironment
     }
 }
 
+public static class DirectoryCleanupPolicy
+{
+    // rmdir removes a junction itself and does not follow its target.
+    public const string FallbackCommand = "rmdir /s /q";
+    public const int FallbackTimeoutMilliseconds = 300000;
+}
+
 public sealed class ProcessExecutionResult
 {
     public int ExitCode { get; private set; }
@@ -1165,11 +1172,11 @@ public sealed class ManagerForm : Form
         }
         catch (PathTooLongException)
         {
-            DeleteDirectoryTreeWithRobocopy(path);
+            DeleteDirectoryTreeWithRmdir(path);
         }
         catch (UnauthorizedAccessException)
         {
-            DeleteDirectoryTreeWithRobocopy(path);
+            DeleteDirectoryTreeWithRmdir(path);
         }
     }
 
@@ -1201,28 +1208,21 @@ public sealed class ManagerForm : Form
         Directory.Delete(path, false);
     }
 
-    private void DeleteDirectoryTreeWithRobocopy(string path)
+    private void DeleteDirectoryTreeWithRmdir(string path)
     {
-        string empty = Path.Combine(Path.GetTempPath(), "dsh-empty-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(empty);
-        try
+        var psi = NewProcess("cmd.exe", "/c " + DirectoryCleanupPolicy.FallbackCommand + " " + QuoteArgument(path), Path.GetDirectoryName(path), false);
+        using (var process = Process.Start(psi))
         {
-            var psi = NewProcess("robocopy.exe", QuoteArgument(empty) + " " + QuoteArgument(path) + " /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0", Path.GetDirectoryName(path), false);
-            int exitCode;
-            using (var process = Process.Start(psi))
+            if (!process.WaitForExit(DirectoryCleanupPolicy.FallbackTimeoutMilliseconds))
             {
-                process.WaitForExit();
-                exitCode = process.ExitCode;
+                try { process.Kill(); } catch { }
+                throw new TimeoutException("清理目录超过 5 分钟，已停止清理进程。备份目录将保留，之后可再次清理。");
             }
-            if (exitCode > 7)
-                throw new InvalidOperationException("清理长路径目录失败，Robocopy 退出码 " + exitCode + "。");
-            Directory.Delete(path, false);
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException("清理长路径目录失败，rmdir 退出码 " + process.ExitCode + "。");
         }
-        finally
-        {
-            if (Directory.Exists(empty))
-                Directory.Delete(empty, false);
-        }
+        if (Directory.Exists(path))
+            throw new IOException("清理长路径目录后目录仍然存在。");
     }
 
     private string QuoteArgument(string value)

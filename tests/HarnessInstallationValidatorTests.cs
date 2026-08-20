@@ -25,6 +25,11 @@ public static class HarnessInstallationValidatorTests
         if (BuildRetryPolicy.ShouldRetry("pnpm install", 1))
             throw new InvalidOperationException("Non-build commands should not use the build retry policy.");
 
+        if (DirectoryCleanupPolicy.FallbackCommand != "rmdir /s /q")
+            throw new InvalidOperationException("Directory cleanup must use junction-safe rmdir.");
+        if (DirectoryCleanupPolicy.FallbackTimeoutMilliseconds <= 0)
+            throw new InvalidOperationException("Directory cleanup must have a timeout.");
+
         var process = new System.Diagnostics.ProcessStartInfo();
         BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");
         string commit = process.EnvironmentVariables["DSH_CLIENT_COMMIT_HASH"];
