@@ -183,6 +183,32 @@ public static class DirectoryCleanupPolicy
     public const int FallbackTimeoutMilliseconds = 300000;
 }
 
+public enum HarnessLaunchMode
+{
+    BuiltCli,
+    SourceFallback
+}
+
+public static class HarnessStartupPolicy
+{
+    public const string BuiltCliRelativePath = "apps\\cli\\lib\\bin.js";
+    public const string WebArguments = "web --no-open";
+
+    public static HarnessLaunchMode SelectLaunchMode(bool builtCliExists)
+    {
+        return builtCliExists ? HarnessLaunchMode.BuiltCli : HarnessLaunchMode.SourceFallback;
+    }
+
+    public static bool IsWebReadyLine(string line, int port)
+    {
+        string prefix = "dsh web: http://127.0.0.1:" + port.ToString();
+        string candidate = (line ?? "").Trim();
+        if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return candidate.Length == prefix.Length || Char.IsWhiteSpace(candidate[prefix.Length]);
+    }
+}
+
 public sealed class ProcessExecutionResult
 {
     public int ExitCode { get; private set; }
@@ -204,6 +230,7 @@ public sealed class ManagerForm : Form
     private const string RepoZipTemplate = "https://github.com/deepseek-ai/deepseek-harness/archive/refs/heads/{0}.zip";
     private const string NodeIndex = "https://nodejs.org/dist/index.json";
     private const int FallbackMinimumNodeMajor = 20;
+    private const int WebStartupTimeoutSeconds = 120;
 
     private readonly Label pathBox = new Label();
     private readonly Label statusLabel = new Label();
@@ -812,7 +839,6 @@ public sealed class ManagerForm : Form
             throw new InvalidOperationException("Harness 安装不完整，请点击“修复安装”恢复缺失的官方文件。");
         selectedSourceCommit = LocalCommit();
         await EnsureNodeAsync();
-        await PreparePnpmAsync();
         if (IsPortOpen(3080))
         {
             int owner = FindPortOwner(3080);
@@ -825,28 +851,61 @@ public sealed class ManagerForm : Form
             }
             throw new InvalidOperationException("3080 端口正被其他程序占用，请先释放端口后再启动 Harness。");
         }
-        var psi = NewPnpmProcess("dsh web", Source);
+        Stopwatch startupTime = Stopwatch.StartNew();
+        TaskCompletionSource<bool> webReady = new TaskCompletionSource<bool>();
+        ProcessStartInfo psi = await NewHarnessWebProcessAsync();
         server = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        server.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { if (!String.IsNullOrEmpty(e.Data)) Log(e.Data); };
+        server.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
+        {
+            if (String.IsNullOrEmpty(e.Data))
+                return;
+            Log(e.Data);
+            if (HarnessStartupPolicy.IsWebReadyLine(e.Data, 3080))
+                webReady.TrySetResult(true);
+        };
         server.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (!String.IsNullOrEmpty(e.Data)) Log(e.Data); };
         server.Start();
         server.BeginOutputReadLine();
         server.BeginErrorReadLine();
         WriteState(ReadStateValue("commit"), server.Id.ToString());
-        for (int i = 0; i < 60; i++)
+        Log("Harness 进程已启动，正在初始化服务和插件...");
+        bool portObserved = false;
+        for (int i = 0; i < WebStartupTimeoutSeconds * 4; i++)
         {
-            if (IsPortOpen(3080))
+            if (!portObserved && IsPortOpen(3080))
             {
-                Log(openBrowser ? "Harness 已启动，浏览器页面已打开。" : "Harness 已启动。");
+                portObserved = true;
+                Log("Web 服务端口已监听，继续等待 Harness 完成初始化...");
+            }
+            if (webReady.Task.IsCompleted)
+            {
+                startupTime.Stop();
+                Log("Harness 已就绪，用时 " + startupTime.Elapsed.TotalSeconds.ToString("0.0") + " 秒。");
                 if (openBrowser)
+                {
+                    Log("正在打开 Harness 页面...");
                     Process.Start("http://127.0.0.1:3080");
+                }
                 return;
             }
             if (server.HasExited)
                 throw new InvalidOperationException("Harness 启动失败，进程已退出，退出码 " + server.ExitCode + "。请查看下方日志。");
-            await Task.Delay(1000);
+            await Task.Delay(250);
         }
-        throw new InvalidOperationException("启动超时，请查看下方日志。");
+        throw new InvalidOperationException("等待 Harness 完成初始化超过 " + WebStartupTimeoutSeconds + " 秒。请查看下方日志。服务端口" + (portObserved ? "已监听，但插件初始化未完成。" : "尚未监听。"));
+    }
+
+    private async Task<ProcessStartInfo> NewHarnessWebProcessAsync()
+    {
+        string builtCli = Path.Combine(Source, HarnessStartupPolicy.BuiltCliRelativePath);
+        if (HarnessStartupPolicy.SelectLaunchMode(File.Exists(builtCli)) == HarnessLaunchMode.BuiltCli)
+        {
+            Log("启动器：使用已构建 CLI。");
+            return NewNodeProcess(QuoteArgument(builtCli) + " " + HarnessStartupPolicy.WebArguments, Source);
+        }
+        Log("启动器：未找到已构建 CLI，使用兼容启动模式。");
+        await PreparePnpmAsync();
+        return NewPnpmProcess("dsh " + HarnessStartupPolicy.WebArguments, Source);
     }
 
     private async Task StopAsync()
@@ -1405,6 +1464,14 @@ public sealed class ManagerForm : Form
         if (!String.IsNullOrEmpty(selectedCorepack))
             return NewProcess(selectedCorepack, "pnpm " + args, workingDirectory);
         throw new InvalidOperationException("未找到可用的 Node.js、Corepack 或 pnpm 运行环境。");
+    }
+
+    private ProcessStartInfo NewNodeProcess(string args, string workingDirectory)
+    {
+        string node = Path.Combine(selectedNodeDirectory, "node.exe");
+        if (!File.Exists(node))
+            throw new InvalidOperationException("已检测到 Node.js，但无法定位 node.exe。请重新扫描或修复安装。");
+        return NewProcess(node, args, workingDirectory);
     }
 
     private string FindExecutable(string fileName)

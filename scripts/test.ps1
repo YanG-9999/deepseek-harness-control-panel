@@ -9,7 +9,8 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),
     (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
     (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs'),
-    (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs')
+    (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs'),
+    (Join-Path $projectRoot 'tests\HarnessStartupPolicyTests.cs')
 )
 $testOutput = Join-Path $projectRoot 'bin\StopTargetResolverTests.exe'
 
@@ -18,7 +19,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-& $compiler /nologo /target:exe /out:$testOutput /r:$app $testSources
+& $compiler /nologo /target:exe /main:StopTargetResolverTests /out:$testOutput /r:$app $testSources
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
