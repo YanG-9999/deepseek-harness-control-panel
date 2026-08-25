@@ -10,6 +10,8 @@ public static class StopTargetResolverTests
         LogViewRenderingTests.Run();
         HarnessInstallationValidatorTests.Run();
         HarnessStartupPolicyTests.Run();
+        HarnessLifecyclePolicyTests.Run();
+        HarnessProfileDiagnosticsTests.Run();
 
         AssertResolution(
             StopTargetKind.None,

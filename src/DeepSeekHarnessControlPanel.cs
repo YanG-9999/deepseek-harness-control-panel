@@ -209,6 +209,66 @@ public static class HarnessStartupPolicy
     }
 }
 
+public static class HarnessLifecyclePolicy
+{
+    public const int StartupTimeoutSeconds = 120;
+    public const int StopTimeoutMilliseconds = 30000;
+    public const int PollIntervalMilliseconds = 250;
+    public const int EndpointProbeIntervalMilliseconds = 1000;
+    public const int EndpointProbeTimeoutMilliseconds = 3000;
+    public const string LocalWebUri = "http://127.0.0.1:3080/";
+
+    public static bool IsHarnessDocument(string content)
+    {
+        return !String.IsNullOrWhiteSpace(content) &&
+            content.IndexOf("<!doctype html", StringComparison.OrdinalIgnoreCase) >= 0 &&
+            content.IndexOf("__DSH_BOOT__", StringComparison.Ordinal) >= 0;
+    }
+
+    public static bool IsStartupReady(bool processAlive, bool portOpen, bool endpointReady, bool officialReadyLog)
+    {
+        return processAlive && portOpen && (endpointReady || officialReadyLog);
+    }
+
+    public static int StopWaitAttempts(int timeoutMilliseconds, int pollIntervalMilliseconds)
+    {
+        if (pollIntervalMilliseconds <= 0)
+            throw new ArgumentOutOfRangeException("pollIntervalMilliseconds");
+        return Math.Max(1, timeoutMilliseconds / pollIntervalMilliseconds);
+    }
+
+    public static string StartupFailureMessage(bool portObserved, bool endpointObserved)
+    {
+        if (!portObserved)
+            return "Harness 服务尚未监听 3080 端口。请检查日志中的 Node.js、依赖或端口占用错误。";
+        if (!endpointObserved)
+            return "Harness 端口已监听，但页面尚未可访问。通常是 Harness 或插件仍在初始化，请检查日志中的错误。";
+        return "Harness 页面已响应，但启动进程未能保持运行。请检查日志中的退出原因。";
+    }
+}
+
+public static class HarnessProfileDiagnostics
+{
+    public static bool IsThirdPartyPackage(string packageName)
+    {
+        return !String.IsNullOrWhiteSpace(packageName) &&
+            !packageName.StartsWith("@deepseek-ai/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static int CountThirdPartyPackages(IEnumerable<string> packageNames)
+    {
+        return packageNames == null ? 0 : packageNames.Count(IsThirdPartyPackage);
+    }
+
+    public static string BuildStartupHint(int configuredPackageCount, int thirdPartyPackageCount)
+    {
+        if (configuredPackageCount <= 0 || thirdPartyPackageCount <= 0)
+            return "";
+        return "启动提示：当前 Web 配置包含 " + configuredPackageCount + " 个扩展包，其中 " +
+            thirdPartyPackageCount + " 个为第三方扩展。页面首次加载仍需由浏览器初始化这些扩展。";
+    }
+}
+
 public sealed class ProcessExecutionResult
 {
     public int ExitCode { get; private set; }
@@ -230,8 +290,6 @@ public sealed class ManagerForm : Form
     private const string RepoZipTemplate = "https://github.com/deepseek-ai/deepseek-harness/archive/refs/heads/{0}.zip";
     private const string NodeIndex = "https://nodejs.org/dist/index.json";
     private const int FallbackMinimumNodeMajor = 20;
-    private const int WebStartupTimeoutSeconds = 120;
-
     private readonly Label pathBox = new Label();
     private readonly Label statusLabel = new Label();
     private readonly Label runningLabel = new Label();
@@ -571,7 +629,7 @@ public sealed class ManagerForm : Form
                 if (t.IsFaulted)
                 {
                     string message = t.Exception == null ? "未知错误" : t.Exception.GetBaseException().Message;
-                    Log("失败: " + message);
+                    Log("失败摘要：" + title + "未完成。原因：" + message);
                     MessageBox.Show(this, message, "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
                 else
@@ -839,12 +897,16 @@ public sealed class ManagerForm : Form
             throw new InvalidOperationException("Harness 安装不完整，请点击“修复安装”恢复缺失的官方文件。");
         selectedSourceCommit = LocalCommit();
         await EnsureNodeAsync();
+        LogProfileStartupHint();
         if (IsPortOpen(3080))
         {
             int owner = FindPortOwner(3080);
             if (owner > 0 && IsLikelyHarnessProcess(owner))
             {
-                Log("Harness 已经在运行。");
+                Log("检测到 Harness 进程，正在确认本地页面...");
+                if (!await IsHarnessEndpointReadyAsync())
+                    throw new InvalidOperationException("检测到 Harness 进程和 3080 端口，但本地页面无法确认可访问。请点击“重启”恢复服务。");
+                Log("Harness 已经在运行，页面响应正常。");
                 if (openBrowser)
                     Process.Start("http://127.0.0.1:3080");
                 return;
@@ -870,17 +932,28 @@ public sealed class ManagerForm : Form
         WriteState(ReadStateValue("commit"), server.Id.ToString());
         Log("Harness 进程已启动，正在初始化服务和插件...");
         bool portObserved = false;
-        for (int i = 0; i < WebStartupTimeoutSeconds * 4; i++)
+        bool endpointObserved = false;
+        int endpointProbeEvery = HarnessLifecyclePolicy.EndpointProbeIntervalMilliseconds / HarnessLifecyclePolicy.PollIntervalMilliseconds;
+        for (int i = 0; i < HarnessLifecyclePolicy.StartupTimeoutSeconds * 1000 / HarnessLifecyclePolicy.PollIntervalMilliseconds; i++)
         {
-            if (!portObserved && IsPortOpen(3080))
+            bool portOpen = IsPortOpen(3080);
+            if (!portObserved && portOpen)
             {
                 portObserved = true;
                 Log("Web 服务端口已监听，继续等待 Harness 完成初始化...");
             }
-            if (webReady.Task.IsCompleted)
+            if (portOpen && !endpointObserved && i % endpointProbeEvery == 0)
+            {
+                endpointObserved = await IsHarnessEndpointReadyAsync();
+                if (endpointObserved)
+                    Log("Harness 页面响应正常，已确认服务可访问。");
+            }
+            bool officialReadyLog = webReady.Task.IsCompleted;
+            if (HarnessLifecyclePolicy.IsStartupReady(!server.HasExited, portOpen, endpointObserved, officialReadyLog))
             {
                 startupTime.Stop();
-                Log("Harness 已就绪，用时 " + startupTime.Elapsed.TotalSeconds.ToString("0.0") + " 秒。");
+                Log("Harness 已就绪，用时 " + startupTime.Elapsed.TotalSeconds.ToString("0.0") + " 秒。" +
+                    (officialReadyLog ? "已收到官方就绪日志。" : "已通过本地页面验证。"));
                 if (openBrowser)
                 {
                     Log("正在打开 Harness 页面...");
@@ -890,9 +963,74 @@ public sealed class ManagerForm : Form
             }
             if (server.HasExited)
                 throw new InvalidOperationException("Harness 启动失败，进程已退出，退出码 " + server.ExitCode + "。请查看下方日志。");
-            await Task.Delay(250);
+            await Task.Delay(HarnessLifecyclePolicy.PollIntervalMilliseconds);
         }
-        throw new InvalidOperationException("等待 Harness 完成初始化超过 " + WebStartupTimeoutSeconds + " 秒。请查看下方日志。服务端口" + (portObserved ? "已监听，但插件初始化未完成。" : "尚未监听。"));
+        throw new InvalidOperationException("等待 Harness 完成初始化超过 " + HarnessLifecyclePolicy.StartupTimeoutSeconds + " 秒。" +
+            HarnessLifecyclePolicy.StartupFailureMessage(portObserved, endpointObserved));
+    }
+
+    private async Task<bool> IsHarnessEndpointReadyAsync()
+    {
+        try
+        {
+            using (var cancellation = new CancellationTokenSource(HarnessLifecyclePolicy.EndpointProbeTimeoutMilliseconds))
+            using (HttpResponseMessage response = await http.GetAsync(
+                HarnessLifecyclePolicy.LocalWebUri,
+                HttpCompletionOption.ResponseContentRead,
+                cancellation.Token))
+            {
+                if (!response.IsSuccessStatusCode)
+                    return false;
+                string content = await response.Content.ReadAsStringAsync();
+                return HarnessLifecyclePolicy.IsHarnessDocument(content);
+            }
+        }
+        catch (HttpRequestException)
+        {
+            return false;
+        }
+        catch (TaskCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private void LogProfileStartupHint()
+    {
+        string profilePackage = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dsh", "profiles", "web", "package.json");
+        if (!File.Exists(profilePackage))
+            return;
+        try
+        {
+            var serializer = new JavaScriptSerializer();
+            var root = serializer.DeserializeObject(File.ReadAllText(profilePackage)) as Dictionary<string, object>;
+            Dictionary<string, object> dsh;
+            Dictionary<string, object> profile;
+            object bundlesValue;
+            if (root == null || !root.TryGetValue("dsh", out bundlesValue) ||
+                (dsh = bundlesValue as Dictionary<string, object>) == null ||
+                !dsh.TryGetValue("profile", out bundlesValue) ||
+                (profile = bundlesValue as Dictionary<string, object>) == null ||
+                !profile.TryGetValue("bundles", out bundlesValue))
+                return;
+            object[] bundles = bundlesValue as object[];
+            if (bundles == null)
+                return;
+            List<string> names = bundles
+                .Select(bundle => bundle as string)
+                .Where(bundle => !String.IsNullOrWhiteSpace(bundle))
+                .ToList();
+            int thirdParty = HarnessProfileDiagnostics.CountThirdPartyPackages(names);
+            string hint = HarnessProfileDiagnostics.BuildStartupHint(names.Count, thirdParty);
+            if (!String.IsNullOrEmpty(hint))
+                Log(hint);
+        }
+        catch
+        {
+            // A profile is user-owned and optional; diagnostics must never block startup.
+        }
     }
 
     private async Task<ProcessStartInfo> NewHarnessWebProcessAsync()
@@ -933,10 +1071,18 @@ public sealed class ManagerForm : Form
             int pid = resolution.ProcessId;
             RunTool("taskkill.exe", "/PID " + pid + " /T /F", Root);
             WriteState(ReadStateValue("commit"), "");
-            for (int i = 0; i < 20 && IsPortOpen(3080); i++)
-                await Task.Delay(250);
+            for (int i = 0; i < HarnessLifecyclePolicy.StopWaitAttempts(
+                HarnessLifecyclePolicy.StopTimeoutMilliseconds,
+                HarnessLifecyclePolicy.PollIntervalMilliseconds) && IsPortOpen(3080); i++)
+            {
+                await Task.Delay(HarnessLifecyclePolicy.PollIntervalMilliseconds);
+            }
             if (IsPortOpen(3080))
-                throw new InvalidOperationException("进程已结束，但 3080 端口仍被占用。");
+            {
+                int remainingPid = FindPortOwner(3080);
+                throw new InvalidOperationException("已等待 30 秒，但 3080 端口仍被占用。" +
+                    (remainingPid > 0 ? "占用进程 PID: " + remainingPid + "。" : ""));
+            }
             Log("已停止 Harness 进程树并释放 3080 端口。");
         }
         else
