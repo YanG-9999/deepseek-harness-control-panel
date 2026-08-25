@@ -12,6 +12,7 @@ public static class StopTargetResolverTests
         HarnessStartupPolicyTests.Run();
         HarnessLifecyclePolicyTests.Run();
         HarnessProfileDiagnosticsTests.Run();
+        HarnessProcessIdentityPolicyTests.Run();
 
         AssertResolution(
             StopTargetKind.None,

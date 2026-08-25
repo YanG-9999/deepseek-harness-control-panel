@@ -269,6 +269,25 @@ public static class HarnessProfileDiagnostics
     }
 }
 
+public static class HarnessProcessIdentityPolicy
+{
+    public static bool IsHarnessCommandLine(string commandLine)
+    {
+        string candidate = (commandLine ?? "").ToLowerInvariant();
+        if (String.IsNullOrWhiteSpace(candidate))
+            return false;
+        if (candidate.Contains("deepseek-harness") || candidate.Contains("deepseekharness"))
+            return true;
+        bool startsWeb = candidate.Contains("web");
+        return startsWeb &&
+            (candidate.Contains("apps/cli/src/bin.ts") ||
+             candidate.Contains("apps\\cli\\src\\bin.ts") ||
+             candidate.Contains("apps/cli/lib/bin.js") ||
+             candidate.Contains("apps\\cli\\lib\\bin.js") ||
+             candidate.Contains("dsh web"));
+    }
+}
+
 public sealed class ProcessExecutionResult
 {
     public int ExitCode { get; private set; }
@@ -2085,11 +2104,7 @@ public sealed class ManagerForm : Form
         int current = pid;
         for (int depth = 0; depth < 8 && current > 0; depth++)
         {
-            string commandLine = GetProcessCommandLine(current).ToLowerInvariant();
-            if (commandLine.Contains("deepseek-harness") ||
-                (commandLine.Contains("apps/cli/src/bin.ts") && commandLine.Contains("web")) ||
-                (commandLine.Contains("apps\\cli\\src\\bin.ts") && commandLine.Contains("web")) ||
-                (commandLine.Contains("dsh") && commandLine.Contains("web")))
+            if (HarnessProcessIdentityPolicy.IsHarnessCommandLine(GetProcessCommandLine(current)))
                 return true;
             int parent = GetParentProcessId(current);
             if (parent == current)
