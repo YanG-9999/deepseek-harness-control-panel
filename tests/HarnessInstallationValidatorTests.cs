@@ -29,6 +29,10 @@ public static class HarnessInstallationValidatorTests
             throw new InvalidOperationException("Directory cleanup must use junction-safe rmdir.");
         if (DirectoryCleanupPolicy.FallbackTimeoutMilliseconds <= 0)
             throw new InvalidOperationException("Directory cleanup must have a timeout.");
+        if (DirectoryCleanupPolicy.FallbackAttempts < 2)
+            throw new InvalidOperationException("Directory cleanup must retry transient Windows locks.");
+        if (DirectoryCleanupPolicy.RetryDelayMilliseconds <= 0)
+            throw new InvalidOperationException("Directory cleanup retries must have a short delay.");
 
         var process = new System.Diagnostics.ProcessStartInfo();
         BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");

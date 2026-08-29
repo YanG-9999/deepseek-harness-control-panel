@@ -181,6 +181,8 @@ public static class DirectoryCleanupPolicy
     // rmdir removes a junction itself and does not follow its target.
     public const string FallbackCommand = "rmdir /s /q";
     public const int FallbackTimeoutMilliseconds = 300000;
+    public const int FallbackAttempts = 3;
+    public const int RetryDelayMilliseconds = 1000;
 }
 
 public enum HarnessLaunchMode
@@ -1397,11 +1399,20 @@ public sealed class ManagerForm : Form
         catch (PathTooLongException)
         {
             DeleteDirectoryTreeWithRmdir(path);
+            return;
         }
         catch (UnauthorizedAccessException)
         {
             DeleteDirectoryTreeWithRmdir(path);
+            return;
         }
+        catch (IOException)
+        {
+            DeleteDirectoryTreeWithRmdir(path);
+            return;
+        }
+        if (Directory.Exists(path))
+            DeleteDirectoryTreeWithRmdir(path);
     }
 
     private void DeleteDirectoryTreeManaged(string path)
@@ -1434,19 +1445,31 @@ public sealed class ManagerForm : Form
 
     private void DeleteDirectoryTreeWithRmdir(string path)
     {
-        var psi = NewProcess("cmd.exe", "/c " + DirectoryCleanupPolicy.FallbackCommand + " " + QuoteArgument(path), Path.GetDirectoryName(path), false);
-        using (var process = Process.Start(psi))
+        int lastExitCode = -1;
+        for (int attempt = 1; attempt <= DirectoryCleanupPolicy.FallbackAttempts; attempt++)
         {
-            if (!process.WaitForExit(DirectoryCleanupPolicy.FallbackTimeoutMilliseconds))
+            if (!Directory.Exists(path))
+                return;
+            var psi = NewProcess("cmd.exe", "/c " + DirectoryCleanupPolicy.FallbackCommand + " " + QuoteArgument(path), Path.GetDirectoryName(path), false);
+            using (var process = Process.Start(psi))
             {
-                try { process.Kill(); } catch { }
-                throw new TimeoutException("清理目录超过 5 分钟，已停止清理进程。备份目录将保留，之后可再次清理。");
+                if (!process.WaitForExit(DirectoryCleanupPolicy.FallbackTimeoutMilliseconds))
+                {
+                    try { process.Kill(); } catch { }
+                    throw new TimeoutException("清理目录超过 5 分钟，已停止清理进程。备份目录将保留，之后可再次清理。");
+                }
+                lastExitCode = process.ExitCode;
             }
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException("清理长路径目录失败，rmdir 退出码 " + process.ExitCode + "。");
+            if (!Directory.Exists(path))
+                return;
+            if (attempt < DirectoryCleanupPolicy.FallbackAttempts)
+            {
+                Log("清理目录暂未完成，正在重试（" + (attempt + 1) + "/" + DirectoryCleanupPolicy.FallbackAttempts + "）: " + path);
+                Thread.Sleep(DirectoryCleanupPolicy.RetryDelayMilliseconds);
+            }
         }
-        if (Directory.Exists(path))
-            throw new IOException("清理长路径目录后目录仍然存在。");
+        throw new IOException("清理目录失败，已尝试 " + DirectoryCleanupPolicy.FallbackAttempts + " 次，目录仍存在: " + path +
+            "。rmdir 最后退出码 " + lastExitCode + "。请关闭占用该目录的程序后重试。");
     }
 
     private string QuoteArgument(string value)
