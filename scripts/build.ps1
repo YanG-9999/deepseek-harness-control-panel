@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
     /r:System.Net.Http.dll `
+    /r:System.Security.dll `
     /r:System.Web.Extensions.dll `
     /r:System.Management.dll `
     /r:System.IO.Compression.dll `

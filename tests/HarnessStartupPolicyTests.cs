@@ -19,6 +19,23 @@ public static class HarnessStartupPolicyTests
             throw new InvalidOperationException("Harness must not open a second browser window.");
         if (!HarnessStartupPolicy.IsWebReadyLine("dsh web: http://127.0.0.1:3080", 3080))
             throw new InvalidOperationException("The official ready log should mark the web service ready.");
+        string authenticatedUrl = HarnessStartupPolicy.GetWebReadyUrl(
+            "dsh web: http://127.0.0.1:3080/?token=test-token (LAN: http://192.168.1.5:3080/?token=test-token)",
+            3080);
+        if (authenticatedUrl != "http://127.0.0.1:3080/?token=test-token")
+            throw new InvalidOperationException("The authenticated loopback URL must be preserved exactly.");
+        string redactedUrl = HarnessStartupPolicy.RedactWebToken(authenticatedUrl);
+        if (redactedUrl.Contains("test-token") || !redactedUrl.Contains("token=<redacted>"))
+            throw new InvalidOperationException("The web token must not be exposed in control panel logs.");
+        string protectedUrl = StateSecretProtection.Protect(authenticatedUrl);
+        if (protectedUrl.Contains("test-token") || StateSecretProtection.Unprotect(protectedUrl) != authenticatedUrl)
+            throw new InvalidOperationException("The stored web URL must be encrypted for the current Windows user.");
+        if (!HarnessStartupPolicy.IsWebReadyLine("dsh web: http://127.0.0.1:3080/?token=test-token", 3080))
+            throw new InvalidOperationException("An authenticated official ready URL should mark the service ready.");
+        if (HarnessStartupPolicy.GetWebReadyUrl("dsh web: http://evil.example:3080/?token=test-token", 3080) != "")
+            throw new InvalidOperationException("A non-loopback ready URL must never be opened.");
+        if (HarnessStartupPolicy.GetWebReadyUrl("dsh web: http://127.0.0.1:3081/?token=test-token", 3080) != "")
+            throw new InvalidOperationException("A ready URL on another port must never be opened.");
         if (HarnessStartupPolicy.IsWebReadyLine("dsh web: opening the default browser", 3080))
             throw new InvalidOperationException("The browser handoff log must not be mistaken for service readiness.");
         if (HarnessStartupPolicy.IsWebReadyLine("dsh web: http://127.0.0.1:8080", 3080))

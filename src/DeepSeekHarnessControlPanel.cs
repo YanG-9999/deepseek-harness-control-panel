@@ -7,6 +7,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -213,11 +214,64 @@ public static class HarnessStartupPolicy
 
     public static bool IsWebReadyLine(string line, int port)
     {
-        string prefix = "dsh web: http://127.0.0.1:" + port.ToString();
+        return !String.IsNullOrEmpty(GetWebReadyUrl(line, port));
+    }
+
+    public static string GetWebReadyUrl(string line, int port)
+    {
+        const string prefix = "dsh web:";
         string candidate = (line ?? "").Trim();
         if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            return false;
-        return candidate.Length == prefix.Length || Char.IsWhiteSpace(candidate[prefix.Length]);
+            return "";
+        string remainder = candidate.Substring(prefix.Length).TrimStart();
+        int separator = remainder.IndexOfAny(new[] { ' ', '\t', '\r', '\n' });
+        string value = separator >= 0 ? remainder.Substring(0, separator) : remainder;
+        Uri uri;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out uri) ||
+            !String.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+            !String.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+            uri.Port != port)
+            return "";
+        return uri.AbsoluteUri;
+    }
+
+    public static string RedactWebToken(string value)
+    {
+        return Regex.Replace(value ?? "", "([?&]token=)[^&\\s)]+", "$1<redacted>", RegexOptions.IgnoreCase);
+    }
+}
+
+public static class StateSecretProtection
+{
+    private const string Prefix = "dpapi:";
+
+    public static string Protect(string value)
+    {
+        if (String.IsNullOrEmpty(value))
+            return "";
+        byte[] plain = Encoding.UTF8.GetBytes(value);
+        byte[] encrypted = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser);
+        return Prefix + Convert.ToBase64String(encrypted);
+    }
+
+    public static string Unprotect(string value)
+    {
+        if (String.IsNullOrEmpty(value) || !value.StartsWith(Prefix, StringComparison.Ordinal))
+            return "";
+        try
+        {
+            byte[] encrypted = Convert.FromBase64String(value.Substring(Prefix.Length));
+            byte[] plain = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch (CryptographicException)
+        {
+            return "";
+        }
+        catch (FormatException)
+        {
+            return "";
+        }
     }
 }
 
@@ -537,7 +591,13 @@ public sealed class ManagerForm : Form
 
     private void OpenClick(object sender, EventArgs e)
     {
-        Process.Start("http://127.0.0.1:3080");
+        string readyUrl = StoredWebUrl();
+        if (String.IsNullOrEmpty(readyUrl))
+        {
+            Log("当前运行实例没有可用的认证地址，请点击“重启”生成新的访问地址。");
+            return;
+        }
+        Process.Start(readyUrl);
     }
 
     private void RescanClick(object sender, EventArgs e)
@@ -934,33 +994,42 @@ public sealed class ManagerForm : Form
             int owner = FindPortOwner(3080);
             if (owner > 0 && IsLikelyHarnessProcess(owner))
             {
-                Log("检测到 Harness 进程，正在确认本地页面...");
-                if (!await IsHarnessEndpointReadyAsync())
-                    throw new InvalidOperationException("检测到 Harness 进程和 3080 端口，但本地页面无法确认可访问。请点击“重启”恢复服务。");
-                Log("Harness 已经在运行，页面响应正常。");
+                string existingUrl = StoredWebUrl();
+                Log("Harness 已经在运行。" + (String.IsNullOrEmpty(existingUrl) ? "当前实例没有保存认证地址，请点击“重启”刷新。" : "认证地址可用。"));
                 if (openBrowser)
-                    Process.Start("http://127.0.0.1:3080");
+                {
+                    if (String.IsNullOrEmpty(existingUrl))
+                        throw new InvalidOperationException("Harness 正在运行，但当前实例没有保存认证地址。请点击“重启”生成新的访问地址。");
+                    Process.Start(existingUrl);
+                }
                 return;
             }
             throw new InvalidOperationException("3080 端口正被其他程序占用，请先释放端口后再启动 Harness。");
         }
         Stopwatch startupTime = Stopwatch.StartNew();
-        TaskCompletionSource<bool> webReady = new TaskCompletionSource<bool>();
+        TaskCompletionSource<string> webReady = new TaskCompletionSource<string>();
         ProcessStartInfo psi = await NewHarnessWebProcessAsync();
         server = new Process { StartInfo = psi, EnableRaisingEvents = true };
         server.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
         {
             if (String.IsNullOrEmpty(e.Data))
                 return;
-            Log(e.Data);
-            if (HarnessStartupPolicy.IsWebReadyLine(e.Data, 3080))
-                webReady.TrySetResult(true);
+            string readyUrl = HarnessStartupPolicy.GetWebReadyUrl(e.Data, 3080);
+            if (!String.IsNullOrEmpty(readyUrl))
+            {
+                Log(HarnessStartupPolicy.RedactWebToken(e.Data));
+                webReady.TrySetResult(readyUrl);
+            }
+            else
+            {
+                Log(e.Data);
+            }
         };
         server.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (!String.IsNullOrEmpty(e.Data)) Log(e.Data); };
         server.Start();
         server.BeginOutputReadLine();
         server.BeginErrorReadLine();
-        WriteState(ReadStateValue("commit"), server.Id.ToString());
+        WriteState(ReadStateValue("commit"), server.Id.ToString(), "");
         Log("Harness 进程已启动，正在初始化服务和插件...");
         bool portObserved = false;
         bool endpointObserved = false;
@@ -983,12 +1052,14 @@ public sealed class ManagerForm : Form
             if (HarnessLifecyclePolicy.IsStartupReady(!server.HasExited, portOpen, endpointObserved, officialReadyLog))
             {
                 startupTime.Stop();
+                string readyUrl = officialReadyLog ? webReady.Task.Result : HarnessLifecyclePolicy.LocalWebUri;
+                WriteState(ReadStateValue("commit"), server.Id.ToString(), readyUrl);
                 Log("Harness 已就绪，用时 " + startupTime.Elapsed.TotalSeconds.ToString("0.0") + " 秒。" +
                     (officialReadyLog ? "已收到官方就绪日志。" : "已通过本地页面验证。"));
                 if (openBrowser)
                 {
                     Log("正在打开 Harness 页面...");
-                    Process.Start("http://127.0.0.1:3080");
+                    Process.Start(readyUrl);
                 }
                 return;
             }
@@ -1101,7 +1172,7 @@ public sealed class ManagerForm : Form
         {
             int pid = resolution.ProcessId;
             RunTool("taskkill.exe", "/PID " + pid + " /T /F", Root);
-            WriteState(ReadStateValue("commit"), "");
+            WriteState(ReadStateValue("commit"), "", "");
             for (int i = 0; i < HarnessLifecyclePolicy.StopWaitAttempts(
                 HarnessLifecyclePolicy.StopTimeoutMilliseconds,
                 HarnessLifecyclePolicy.PollIntervalMilliseconds) && IsPortOpen(3080); i++)
@@ -1119,7 +1190,7 @@ public sealed class ManagerForm : Form
         else
         {
             if (recordedPid > 0)
-                WriteState(ReadStateValue("commit"), "");
+                WriteState(ReadStateValue("commit"), "", "");
             Log("Harness 当前未运行。");
         }
     }
@@ -2148,11 +2219,27 @@ public sealed class ManagerForm : Form
         return false;
     }
 
-    private void WriteState(string commit, string pid = null)
+    private string StoredWebUrl()
+    {
+        string value = StateSecretProtection.Unprotect(ReadStateValue("url"));
+        return HarnessStartupPolicy.GetWebReadyUrl("dsh web: " + value, 3080);
+    }
+
+    private void WriteState(string commit, string pid = null, string url = null)
     {
         Directory.CreateDirectory(Root);
-        string json = "{\"commit\":\"" + (commit ?? "") + "\",\"pid\":\"" + (pid ?? ReadStateValue("pid")) + "\",\"updated\":\"" + DateTime.UtcNow.ToString("o") + "\"}";
+        string currentPid = pid ?? ReadStateValue("pid");
+        string currentUrl = url == null ? ReadStateValue("url") : StateSecretProtection.Protect(url);
+        string json = "{\"commit\":\"" + JsonEscape(commit ?? "") +
+            "\",\"pid\":\"" + JsonEscape(currentPid) +
+            "\",\"url\":\"" + JsonEscape(currentUrl) +
+            "\",\"updated\":\"" + DateTime.UtcNow.ToString("o") + "\"}";
         File.WriteAllText(StateFile, json);
+    }
+
+    private static string JsonEscape(string value)
+    {
+        return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
     private int ParseInt(string value)
