@@ -33,6 +33,10 @@ public static class HarnessInstallationValidatorTests
             throw new InvalidOperationException("Directory cleanup must retry transient Windows locks.");
         if (DirectoryCleanupPolicy.RetryDelayMilliseconds <= 0)
             throw new InvalidOperationException("Directory cleanup retries must have a short delay.");
+        if (DirectoryCleanupPolicy.ToExtendedPath("D:\\DeepSeekHarness.dsh-backup") != "\\\\?\\D:\\DeepSeekHarness.dsh-backup")
+            throw new InvalidOperationException("Local cleanup paths must use the Windows extended-length prefix.");
+        if (DirectoryCleanupPolicy.ToExtendedPath("\\\\server\\share\\Harness") != "\\\\?\\UNC\\server\\share\\Harness")
+            throw new InvalidOperationException("UNC cleanup paths must use the Windows extended-length prefix.");
 
         var process = new System.Diagnostics.ProcessStartInfo();
         BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");

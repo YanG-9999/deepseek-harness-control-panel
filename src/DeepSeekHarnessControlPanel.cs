@@ -183,6 +183,16 @@ public static class DirectoryCleanupPolicy
     public const int FallbackTimeoutMilliseconds = 300000;
     public const int FallbackAttempts = 3;
     public const int RetryDelayMilliseconds = 1000;
+
+    public static string ToExtendedPath(string path)
+    {
+        string full = Path.GetFullPath(path);
+        if (full.StartsWith("\\\\?\\", StringComparison.OrdinalIgnoreCase))
+            return full;
+        if (full.StartsWith("\\\\", StringComparison.OrdinalIgnoreCase))
+            return "\\\\?\\UNC\\" + full.Substring(2);
+        return "\\\\?\\" + full;
+    }
 }
 
 public enum HarnessLaunchMode
@@ -1450,7 +1460,8 @@ public sealed class ManagerForm : Form
         {
             if (!Directory.Exists(path))
                 return;
-            var psi = NewProcess("cmd.exe", "/c " + DirectoryCleanupPolicy.FallbackCommand + " " + QuoteArgument(path), Path.GetDirectoryName(path), false);
+            string extendedPath = DirectoryCleanupPolicy.ToExtendedPath(path);
+            var psi = NewProcess("cmd.exe", "/c " + DirectoryCleanupPolicy.FallbackCommand + " " + QuoteArgument(extendedPath), Path.GetDirectoryName(path), false);
             using (var process = Process.Start(psi))
             {
                 if (!process.WaitForExit(DirectoryCleanupPolicy.FallbackTimeoutMilliseconds))
