@@ -169,9 +169,9 @@ public static class HarnessInstallPolicy
 {
     public const string FrozenLockfileSwitch = "--frozen-lockfile";
 
-    public static string BuildDependencyInstallCommand()
+    public static string BuildDependencyInstallCommand(bool hasLockfile)
     {
-        return "pnpm install " + FrozenLockfileSwitch;
+        return "pnpm install " + (hasLockfile ? FrozenLockfileSwitch : "--no-frozen-lockfile");
     }
 
     public static bool HasFrozenLockfile(string command)
@@ -187,7 +187,78 @@ public static class HarnessInstallPolicy
         return Regex.IsMatch(lockfile, pattern, RegexOptions.IgnoreCase);
     }
 
-    public static string BuildInstallFailureHint(string command, string output, bool fsExtDeclaredInLockfile)
+    public static bool SourceManifestContainsPackage(string root, string packageName)
+    {
+        if (String.IsNullOrWhiteSpace(root) || String.IsNullOrWhiteSpace(packageName) || !Directory.Exists(root))
+            return false;
+        string pattern = "\"" + Regex.Escape(packageName.Trim()) + "\"\\s*:";
+        try
+        {
+            foreach (string manifest in Directory.GetFiles(root, "package.json", SearchOption.AllDirectories))
+                if (Regex.IsMatch(File.ReadAllText(manifest), pattern, RegexOptions.IgnoreCase))
+                    return true;
+        }
+        catch
+        {
+            // A best-effort diagnosis must never replace the original command error.
+        }
+        return false;
+    }
+
+    public static string ApplyWindowsFsExtLeaseCompatibility(string source)
+    {
+        if (String.IsNullOrWhiteSpace(source))
+            throw new InvalidOperationException("官方 Harness 的 fs-ext 锁实现文件为空，已停止安装。");
+
+        const string nativeImport = "import { flock } from 'fs-ext'";
+        const string compatibilityMarker = "const dshRequire = createRequire(import.meta.url)";
+        const string lockFileComment = "/** Base name of the kernel lock file inside a session's directory. */";
+        const string flockCall = "    flock(fd, flags, (error) =>";
+        if (source.Contains(compatibilityMarker))
+        {
+            if (!source.Contains("function getDshFlock()") || !source.Contains("getDshFlock()(fd, flags"))
+                throw new InvalidOperationException("官方 Harness 的 fs-ext Windows 兼容入口不完整，已停止安装以避免破坏官方源码。");
+            return source;
+        }
+        if (!source.Contains(nativeImport) || !source.Contains(lockFileComment) || !source.Contains(flockCall))
+            throw new InvalidOperationException("官方 Harness 的 fs-ext Windows 兼容入口发生变化，已停止安装以避免破坏官方源码。");
+
+        string patched = source.Replace(
+            nativeImport,
+            "import { createRequire } from 'node:module'\n" +
+            "\ntype DshFlock = (fd: number, flags: 'exnb' | 'un', callback: (error: Error | null) => void) => void\n" +
+            "\nconst dshRequire = createRequire(import.meta.url)\n" +
+            "let dshFlock: DshFlock | undefined");
+        patched = patched.Replace(
+            lockFileComment,
+            "function getDshFlock(): DshFlock {\n" +
+            "  if (dshFlock === undefined) dshFlock = (dshRequire('fs-ext') as { flock: DshFlock }).flock\n" +
+            "  return dshFlock\n" +
+            "}\n\n" +
+            lockFileComment);
+        patched = patched.Replace(flockCall, "    getDshFlock()(fd, flags, (error) =>");
+        if (patched == source || patched.Contains(nativeImport))
+            throw new InvalidOperationException("无法应用官方 Harness 的 Windows fs-ext 兼容处理，已停止安装。");
+        return patched;
+    }
+
+    public static string DisableFsExtBuildScript(string workspaceYaml)
+    {
+        if (String.IsNullOrWhiteSpace(workspaceYaml))
+            throw new InvalidOperationException("官方 Harness 的 pnpm 工作区配置为空，已停止安装。");
+
+        const string enabledPattern = "(?m)^(\\s*fs-ext\\s*:\\s*)true(\\s*(?:#.*)?)$";
+        const string disabledPattern = "(?m)^\\s*fs-ext\\s*:\\s*false(?:\\s*(?:#.*)?)?$";
+        if (Regex.IsMatch(workspaceYaml, disabledPattern, RegexOptions.IgnoreCase))
+            return workspaceYaml;
+
+        string patched = Regex.Replace(workspaceYaml, enabledPattern, "$1false$2", RegexOptions.IgnoreCase);
+        if (patched == workspaceYaml)
+            throw new InvalidOperationException("官方 Harness 的 fs-ext 构建策略发生变化，已停止安装以避免触发 node-gyp 编译。");
+        return patched;
+    }
+
+    public static string BuildInstallFailureHint(string command, string output, bool fsExtDeclaredBySource)
     {
         if (!Regex.IsMatch(command ?? "", "\\bpnpm\\s+install\\b", RegexOptions.IgnoreCase))
             return "";
@@ -195,8 +266,10 @@ public static class HarnessInstallPolicy
         if (text.IndexOf("node-gyp", StringComparison.OrdinalIgnoreCase) < 0 &&
             text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) < 0)
             return "";
-        if (text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) >= 0 && !fsExtDeclaredInLockfile)
-            return "依赖安装触发了 fs-ext 原生模块编译，但官方锁文件没有声明 fs-ext。已停止本次安装；更新流程会保留旧版本并自动回滚，请不要安装 Visual Studio，先查看完整日志。";
+        if (text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) >= 0 && !fsExtDeclaredBySource)
+            return "依赖安装触发了 fs-ext 原生模块编译，但官方源码没有声明 fs-ext。已停止本次安装；更新流程会保留旧版本并自动回滚，请不要安装 Visual Studio，先查看完整日志。";
+        if (text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "已确认这是官方 Harness 的 fs-ext 原生依赖。Windows 版本应使用官方源码内置的 Win32 锁实现并跳过 fs-ext 编译；本次兼容安装未完成，更新流程会保留旧版本并自动回滚。";
         return "依赖安装触发了需要 node-gyp 的原生模块编译。控制面板不会要求普通用户安装 C++ 编译环境；更新失败时会保留旧版本并自动回滚，请查看完整日志。";
     }
 }
@@ -923,9 +996,10 @@ public sealed class ManagerForm : Form
             ownsInstallRoot = true;
             selectedSourceCommit = commit;
             Directory.CreateDirectory(Path.Combine(installRoot, "logs"));
+            ApplyWindowsHarnessCompatibility();
             await EnsureNodeAsync();
             await PreparePnpmAsync();
-            await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(), "install");
+            await InstallDependenciesAsync("install");
             await RunToolAsync("pnpm run build", "build");
             await VerifyRunnableInstallationAsync();
             WriteState(commit);
@@ -1264,9 +1338,10 @@ public sealed class ManagerForm : Form
             CopyPersistentDirectory(backup, Root, ".dsh-runtime");
             CopyPersistentDirectory(backup, Root, "logs");
             selectedSourceCommit = downloadedCommit;
+            ApplyWindowsHarnessCompatibility();
             await EnsureNodeAsync();
             await PreparePnpmAsync();
-            await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(), "update-install");
+            await InstallDependenciesAsync("update-install");
             await RunToolAsync("pnpm run build", "update-build");
             await VerifyRunnableInstallationAsync();
             WriteState(downloadedCommit);
@@ -1478,11 +1553,49 @@ public sealed class ManagerForm : Form
     {
         string lockfile = Path.Combine(root, "pnpm-lock.yaml");
         if (!File.Exists(lockfile))
-            throw new InvalidOperationException("官方源码缺少 pnpm-lock.yaml，已停止更新以避免安装未锁定的依赖。");
+            Log("官方源码未提供 pnpm-lock.yaml，将按官方 package.json 生成本地锁文件。");
 
         string[] bundledDependencies = Directory.GetDirectories(root, "node_modules", SearchOption.AllDirectories);
         if (bundledDependencies.Length > 0)
             throw new InvalidOperationException("官方源码包中包含预装 node_modules，已停止更新以避免混入非官方依赖。");
+    }
+
+    private async Task InstallDependenciesAsync(string logName)
+    {
+        bool hasLockfile = File.Exists(Path.Combine(Source, "pnpm-lock.yaml"));
+        await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(hasLockfile), logName);
+    }
+
+    private void ApplyWindowsHarnessCompatibility()
+    {
+        if (!IsWindowsPlatform())
+            return;
+        string leaseFile = Path.Combine(Source, "packages", "session", "session-persistence-jsonl", "src", "lease.ts");
+        string workspaceFile = Path.Combine(Source, "pnpm-workspace.yaml");
+        if (!File.Exists(leaseFile))
+            return;
+        if (!File.Exists(workspaceFile))
+            throw new InvalidOperationException("官方 Harness 缺少 pnpm-workspace.yaml，无法安全配置 Windows 兼容安装。");
+
+        string source = File.ReadAllText(leaseFile);
+        if (!source.Contains("import { flock } from 'fs-ext'") && !source.Contains("const dshRequire = createRequire(import.meta.url)"))
+            return;
+
+        string patchedLease = HarnessInstallPolicy.ApplyWindowsFsExtLeaseCompatibility(source);
+        string workspace = File.ReadAllText(workspaceFile);
+        string patchedWorkspace = HarnessInstallPolicy.DisableFsExtBuildScript(workspace);
+        if (patchedLease != source)
+            File.WriteAllText(leaseFile, patchedLease);
+        if (patchedWorkspace != workspace)
+            File.WriteAllText(workspaceFile, patchedWorkspace);
+        Log("已启用官方 Harness 的 Windows 锁实现，并仅跳过 fs-ext 的 node-gyp 编译。");
+    }
+
+    private bool IsWindowsPlatform()
+    {
+        return Environment.OSVersion.Platform == PlatformID.Win32NT ||
+            Environment.OSVersion.Platform == PlatformID.Win32Windows ||
+            Environment.OSVersion.Platform == PlatformID.Win32S;
     }
 
     private async Task VerifyRunnableInstallationAsync()
@@ -1732,6 +1845,8 @@ public sealed class ManagerForm : Form
                 string lockfile = Path.Combine(Source, "pnpm-lock.yaml");
                 if (File.Exists(lockfile))
                     fsExtDeclared = HarnessInstallPolicy.LockfileContainsPackage(File.ReadAllText(lockfile), "fs-ext");
+                if (!fsExtDeclared)
+                    fsExtDeclared = HarnessInstallPolicy.SourceManifestContainsPackage(Source, "fs-ext");
             }
             catch
             {

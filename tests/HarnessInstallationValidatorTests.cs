@@ -25,11 +25,13 @@ public static class HarnessInstallationValidatorTests
         if (BuildRetryPolicy.ShouldRetry("pnpm install", 1))
             throw new InvalidOperationException("Non-build commands should not use the build retry policy.");
 
-        string installCommand = HarnessInstallPolicy.BuildDependencyInstallCommand();
+        string installCommand = HarnessInstallPolicy.BuildDependencyInstallCommand(true);
         if (!HarnessInstallPolicy.HasFrozenLockfile(installCommand))
             throw new InvalidOperationException("Harness dependency installation must use the frozen official lockfile.");
-        if (HarnessInstallPolicy.HasFrozenLockfile("pnpm install"))
+        if (HarnessInstallPolicy.HasFrozenLockfile(HarnessInstallPolicy.BuildDependencyInstallCommand(false)))
             throw new InvalidOperationException("A plain pnpm install must not be treated as frozen.");
+        if (installCommand.Contains("--ignore-scripts"))
+            throw new InvalidOperationException("Windows compatibility must not suppress unrelated official install scripts.");
         if (HarnessInstallPolicy.LockfileContainsPackage("packages:\n  react@18.3.1:\n", "fs-ext"))
             throw new InvalidOperationException("An unrelated lockfile package must not match fs-ext.");
         if (!HarnessInstallPolicy.LockfileContainsPackage("packages:\n  fs-ext@2.1.1:\n", "fs-ext"))
@@ -38,11 +40,32 @@ public static class HarnessInstallationValidatorTests
             installCommand,
             "fs-ext@2.1.1\nnode-gyp rebuild\ngyp ERR! not ok",
             false);
-        if (String.IsNullOrEmpty(nativeHint) || !nativeHint.Contains("官方锁文件没有声明"))
+        if (String.IsNullOrEmpty(nativeHint) || !nativeHint.Contains("官方源码没有声明"))
             throw new InvalidOperationException("The unexpected native dependency failure needs a clear Chinese diagnosis.");
         if (!String.IsNullOrEmpty(HarnessInstallPolicy.BuildInstallFailureHint(
             "pnpm run build", "node-gyp rebuild", false)))
             throw new InvalidOperationException("Native build failures outside dependency installation must not get the install diagnosis.");
+
+        const string upstreamLease = "import { join } from 'node:path'\n" +
+            "import { flock } from 'fs-ext'\n\n" +
+            "/** Base name of the kernel lock file inside a session's directory. */\n" +
+            "function flockAsync(fd: number, flags: 'exnb' | 'un'): Promise<void> {\n" +
+            "  return new Promise((resolve, reject) => {\n" +
+            "    flock(fd, flags, (error) => {\n";
+        string patchedLease = HarnessInstallPolicy.ApplyWindowsFsExtLeaseCompatibility(upstreamLease);
+        if (patchedLease.Contains("import { flock } from 'fs-ext'") ||
+            !patchedLease.Contains("createRequire(import.meta.url)") ||
+            !patchedLease.Contains("getDshFlock()(fd, flags"))
+            throw new InvalidOperationException("Windows fs-ext compatibility patch did not defer the POSIX-only module load.");
+        if (HarnessInstallPolicy.ApplyWindowsFsExtLeaseCompatibility(patchedLease) != patchedLease)
+            throw new InvalidOperationException("Windows fs-ext lease compatibility patch must be idempotent.");
+
+        const string upstreamWorkspace = "allowBuilds:\n  esbuild: true\n  fs-ext: true\n  node-pty: true\n";
+        string patchedWorkspace = HarnessInstallPolicy.DisableFsExtBuildScript(upstreamWorkspace);
+        if (!patchedWorkspace.Contains("fs-ext: false") || !patchedWorkspace.Contains("node-pty: true"))
+            throw new InvalidOperationException("Windows compatibility must disable only fs-ext's native build script.");
+        if (HarnessInstallPolicy.DisableFsExtBuildScript(patchedWorkspace) != patchedWorkspace)
+            throw new InvalidOperationException("The fs-ext build policy patch must be idempotent.");
 
         if (DirectoryCleanupPolicy.FallbackCommand != "rmdir /s /q")
             throw new InvalidOperationException("Directory cleanup must use junction-safe rmdir.");
