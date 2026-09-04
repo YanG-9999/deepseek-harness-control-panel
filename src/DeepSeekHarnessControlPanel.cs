@@ -165,6 +165,42 @@ public static class BuildRetryPolicy
     }
 }
 
+public static class HarnessInstallPolicy
+{
+    public const string FrozenLockfileSwitch = "--frozen-lockfile";
+
+    public static string BuildDependencyInstallCommand()
+    {
+        return "pnpm install " + FrozenLockfileSwitch;
+    }
+
+    public static bool HasFrozenLockfile(string command)
+    {
+        return Regex.IsMatch(command ?? "", "(^|\\s)" + Regex.Escape(FrozenLockfileSwitch) + "($|\\s)", RegexOptions.IgnoreCase);
+    }
+
+    public static bool LockfileContainsPackage(string lockfile, string packageName)
+    {
+        if (String.IsNullOrWhiteSpace(lockfile) || String.IsNullOrWhiteSpace(packageName))
+            return false;
+        string pattern = "(?m)^\\s*" + Regex.Escape(packageName.Trim()) + "@[^:\\r\\n]+:";
+        return Regex.IsMatch(lockfile, pattern, RegexOptions.IgnoreCase);
+    }
+
+    public static string BuildInstallFailureHint(string command, string output, bool fsExtDeclaredInLockfile)
+    {
+        if (!Regex.IsMatch(command ?? "", "\\bpnpm\\s+install\\b", RegexOptions.IgnoreCase))
+            return "";
+        string text = output ?? "";
+        if (text.IndexOf("node-gyp", StringComparison.OrdinalIgnoreCase) < 0 &&
+            text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) < 0)
+            return "";
+        if (text.IndexOf("fs-ext", StringComparison.OrdinalIgnoreCase) >= 0 && !fsExtDeclaredInLockfile)
+            return "依赖安装触发了 fs-ext 原生模块编译，但官方锁文件没有声明 fs-ext。已停止本次安装；更新流程会保留旧版本并自动回滚，请不要安装 Visual Studio，先查看完整日志。";
+        return "依赖安装触发了需要 node-gyp 的原生模块编译。控制面板不会要求普通用户安装 C++ 编译环境；更新失败时会保留旧版本并自动回滚，请查看完整日志。";
+    }
+}
+
 public static class BuildCommitEnvironment
 {
     public const string VariableName = "DSH_CLIENT_COMMIT_HASH";
@@ -889,7 +925,7 @@ public sealed class ManagerForm : Form
             Directory.CreateDirectory(Path.Combine(installRoot, "logs"));
             await EnsureNodeAsync();
             await PreparePnpmAsync();
-            await RunToolAsync("pnpm install", "install");
+            await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(), "install");
             await RunToolAsync("pnpm run build", "build");
             await VerifyRunnableInstallationAsync();
             WriteState(commit);
@@ -911,9 +947,7 @@ public sealed class ManagerForm : Form
             throw new InvalidOperationException("未检测到可修复的 Harness 安装。");
         if (IsInstallationReady())
             throw new InvalidOperationException("Harness 安装完整，无需修复。");
-        string branch = await GetDefaultBranchAsync();
-        string remote = await GetRemoteCommitAsync(branch);
-        await ApplyUpdateAsync(remote);
+        await ApplyUpdateAsync();
     }
 
     private async Task UninstallAsync()
@@ -1212,30 +1246,30 @@ public sealed class ManagerForm : Form
         }
         if (Ask("发现 DeepSeek Harness 更新，是否现在更新？", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
-        await ApplyUpdateAsync(remote);
+        await ApplyUpdateAsync();
     }
 
-    private async Task ApplyUpdateAsync(string remote)
+    private async Task ApplyUpdateAsync()
     {
         await StopAsync();
         string stage = Root + ".dsh-update";
         if (Directory.Exists(stage)) DeleteDirectoryTree(stage);
         string backup = Root + ".dsh-backup";
         if (Directory.Exists(backup)) DeleteDirectoryTree(backup);
-        await DownloadSourceAsync(stage);
+        string downloadedCommit = await DownloadSourceAsync(stage);
         Directory.Move(Root, backup);
         try
         {
             Directory.Move(stage, Root);
             CopyPersistentDirectory(backup, Root, ".dsh-runtime");
             CopyPersistentDirectory(backup, Root, "logs");
-            selectedSourceCommit = remote;
+            selectedSourceCommit = downloadedCommit;
             await EnsureNodeAsync();
             await PreparePnpmAsync();
-            await RunToolAsync("pnpm install", "update-install");
+            await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(), "update-install");
             await RunToolAsync("pnpm run build", "update-build");
             await VerifyRunnableInstallationAsync();
-            WriteState(remote);
+            WriteState(downloadedCommit);
             Log("新版本已构建完成，正在清理旧版本备份...");
             try
             {
@@ -1404,16 +1438,32 @@ public sealed class ManagerForm : Form
     {
         string zip = Path.Combine(Path.GetTempPath(), "dsh-source-" + Guid.NewGuid().ToString("N") + ".zip");
         string branch = await GetDefaultBranchAsync();
-        await DownloadFileAsync(String.Format(RepoZipTemplate, Uri.EscapeDataString(branch)), zip);
         string extract = Path.Combine(Path.GetTempPath(), "dsh-extract-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(extract);
-        ZipFile.ExtractToDirectory(zip, extract);
-        string root = Directory.GetDirectories(extract)[0];
-        if (Directory.Exists(destination)) Directory.Delete(destination, true);
-        CopyDirectory(root, destination);
-        EnsureSourceTreeComplete(destination);
-        Directory.Delete(extract, true);
-        return await GetRemoteCommitAsync(branch);
+        try
+        {
+            await DownloadFileAsync(String.Format(RepoZipTemplate, Uri.EscapeDataString(branch)), zip);
+            Directory.CreateDirectory(extract);
+            ZipFile.ExtractToDirectory(zip, extract);
+            string root = Directory.GetDirectories(extract)[0];
+            if (Directory.Exists(destination)) DeleteDirectoryTree(destination);
+            CopyDirectory(root, destination);
+            EnsureSourceTreeComplete(destination);
+            ValidateDownloadedSource(destination);
+            return await GetRemoteCommitAsync(branch);
+        }
+        finally
+        {
+            TryDeleteDirectory(extract);
+            try
+            {
+                if (File.Exists(zip))
+                    File.Delete(zip);
+            }
+            catch (Exception cleanupError)
+            {
+                Log("清理源码下载临时文件失败: " + zip + " (" + cleanupError.Message + ")");
+            }
+        }
     }
 
     private void EnsureSourceTreeComplete(string root)
@@ -1422,6 +1472,17 @@ public sealed class ManagerForm : Form
         if (missing.Count == 0)
             return;
         throw new InvalidOperationException("官方源码下载不完整，缺少: " + String.Join("、", missing.ToArray()));
+    }
+
+    private void ValidateDownloadedSource(string root)
+    {
+        string lockfile = Path.Combine(root, "pnpm-lock.yaml");
+        if (!File.Exists(lockfile))
+            throw new InvalidOperationException("官方源码缺少 pnpm-lock.yaml，已停止更新以避免安装未锁定的依赖。");
+
+        string[] bundledDependencies = Directory.GetDirectories(root, "node_modules", SearchOption.AllDirectories);
+        if (bundledDependencies.Length > 0)
+            throw new InvalidOperationException("官方源码包中包含预装 node_modules，已停止更新以避免混入非官方依赖。");
     }
 
     private async Task VerifyRunnableInstallationAsync()
@@ -1665,7 +1726,25 @@ public sealed class ManagerForm : Form
                 detail = LastOutputLines(result.StandardOutput, 30);
             if (!String.IsNullOrWhiteSpace(detail))
                 Log("命令失败的最后输出：" + Environment.NewLine + detail);
-            throw new InvalidOperationException(command + " 失败，退出码 " + result.ExitCode + "。");
+            bool fsExtDeclared = false;
+            try
+            {
+                string lockfile = Path.Combine(Source, "pnpm-lock.yaml");
+                if (File.Exists(lockfile))
+                    fsExtDeclared = HarnessInstallPolicy.LockfileContainsPackage(File.ReadAllText(lockfile), "fs-ext");
+            }
+            catch
+            {
+                // The command failure is already known; a diagnostic must never hide it.
+            }
+            string hint = HarnessInstallPolicy.BuildInstallFailureHint(
+                command,
+                result.StandardError + Environment.NewLine + result.StandardOutput,
+                fsExtDeclared);
+            if (!String.IsNullOrEmpty(hint))
+                Log(hint);
+            throw new InvalidOperationException(command + " 失败，退出码 " + result.ExitCode + "." +
+                (String.IsNullOrEmpty(hint) ? "" : Environment.NewLine + hint));
         }
     }
 
