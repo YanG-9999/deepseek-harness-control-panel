@@ -350,10 +350,753 @@ public static class HarnessStartupPolicy
     }
 }
 
+/// <summary>
+/// Transport selection and the out-of-process fetch helper. Some hosts (notably a
+/// Clash-style TUN proxy that answers every name with a fake-IP from 198.18.0.0/15)
+/// complete TLS through Node's OpenSSL stack but fail inside the .NET Framework
+/// SCHANNEL stack with "安全包中没有可用的凭证". The panel therefore keeps .NET as
+/// the default transport and falls back to a Node fetch helper once a request
+/// proves the local TLS stack cannot complete a handshake.
+/// </summary>
+public static class NodeNetworkPolicy
+{
+    public const string UserAgent = "DeepSeekHarnessManager/1.0";
+
+    /// <summary>
+    /// SCHANNEL reports these when the local TLS stack cannot complete a handshake.
+    /// They are a transport fault, never a server rejection, so the request is safe
+    /// to repeat over another stack.
+    ///
+    /// HttpClient does not surface the deepest Win32 text: the observed chain is
+    /// HttpRequestException("发送请求时出错。") wrapping
+    /// WebException("请求被中止: 未能创建 SSL/TLS 安全通道。"). The Win32 message
+    /// ("安全包中没有可用的凭证") stays in the table because a raw
+    /// HttpWebRequest call does expose it.
+    /// </summary>
+    private static readonly string[] TlsStackFaults = new[]
+    {
+        "未能创建 SSL/TLS 安全通道",
+        "Could not create SSL/TLS secure channel",
+        "安全包中没有可用的凭证",
+        "No credentials are available in the security package",
+        "基础连接已经关闭",
+        "The underlying connection was closed",
+        "接收时发生错误",
+        "unexpected error occurred on a receive"
+    };
+
+    /// <summary>
+    /// True when the chain shows a TLS/transport layer failure. Detected
+    /// structurally as well as by message, because HttpClient rewrites the
+    /// deepest SCHANNEL text into a generic SSL/TLS channel error. The chain is
+    /// walked so an <see cref="AggregateException"/> or an
+    /// <c>HttpRequestException</c> wrapper still reaches the real cause.
+    /// </summary>
+    public static bool IsTlsStackFailure(Exception error)
+    {
+        for (Exception current = error; current != null; current = current.InnerException)
+        {
+            if (IsTlsStackFailure(current.Message))
+                return true;
+            if (current is System.Net.WebException)
+                return true;
+        }
+        return false;
+    }
+
+    public static bool IsTlsStackFailure(string message)
+    {
+        if (String.IsNullOrWhiteSpace(message))
+            return false;
+        foreach (string fault in TlsStackFaults)
+        {
+            if (message.IndexOf(fault, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Quotes an argument for the Node command line. Quotes and control characters
+    /// are refused rather than escaped so a crafted path cannot break out of the
+    /// argument.
+    /// </summary>
+    public static string QuoteArgument(string value)
+    {
+        string candidate = value ?? "";
+        if (candidate.IndexOf('"') >= 0 || candidate.IndexOf('\r') >= 0 || candidate.IndexOf('\n') >= 0)
+            throw new InvalidOperationException("路径包含无法安全传给 Node 的字符：" + candidate);
+        return "\"" + candidate + "\"";
+    }
+
+    public static string EscapeJson(string value)
+    {
+        if (String.IsNullOrEmpty(value))
+            return "";
+        var builder = new StringBuilder(value.Length + 16);
+        foreach (char character in value)
+        {
+            switch (character)
+            {
+                case '"': builder.Append("\\\""); break;
+                case '\\': builder.Append("\\\\"); break;
+                case '\n': builder.Append("\\n"); break;
+                case '\r': builder.Append("\\r"); break;
+                case '\t': builder.Append("\\t"); break;
+                default:
+                    if (character < ' ')
+                        builder.Append("\\u").Append(((int)character).ToString("x4"));
+                    else
+                        builder.Append(character);
+                    break;
+            }
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>Builds the request file the helper reads. Kept pure so it is testable.</summary>
+    public static string BuildRequestJson(string url, string outputPath, int timeoutSeconds, string userAgent)
+    {
+        if (String.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException("请求地址为空。");
+        if (String.IsNullOrWhiteSpace(outputPath))
+            throw new InvalidOperationException("输出路径为空。");
+        if (timeoutSeconds <= 0)
+            throw new ArgumentOutOfRangeException("timeoutSeconds");
+        return "{\"url\":\"" + EscapeJson(url) +
+            "\",\"outputPath\":\"" + EscapeJson(outputPath) +
+            "\",\"timeoutSeconds\":" + timeoutSeconds +
+            ",\"userAgent\":\"" + EscapeJson(String.IsNullOrWhiteSpace(userAgent) ? UserAgent : userAgent) +
+            "\"}";
+    }
+
+    public const int DefaultTimeoutSeconds = 1200;
+
+    /// <summary>
+    /// The fetch helper. It runs in a separate process so a stalled socket cannot
+    /// wedge the UI thread, and it streams the body straight to disk so a multi
+    /// hundred megabyte runtime archive is never buffered in memory.
+    /// </summary>
+    public const string HelperScript = @"import { readFile, writeFile } from 'node:fs/promises'
+
+const requestPath = process.argv[2]
+if (!requestPath) {
+  console.log(JSON.stringify({ ok: false, error: 'missing request file argument' }))
+  process.exit(2)
+}
+
+let request
+try {
+  request = JSON.parse(await readFile(requestPath, 'utf8'))
+} catch (error) {
+  console.log(JSON.stringify({ ok: false, error: 'cannot read request: ' + error.message }))
+  process.exit(2)
+}
+
+const controller = new AbortController()
+const timer = setTimeout(() => controller.abort(), Math.max(1, request.timeoutSeconds ?? 1200) * 1000)
+try {
+  const response = await fetch(request.url, {
+    redirect: 'follow',
+    signal: controller.signal,
+    headers: { 'user-agent': request.userAgent ?? 'DeepSeekHarnessManager/1.0' },
+  })
+  const buffer = Buffer.from(await response.arrayBuffer())
+  await writeFile(request.outputPath, buffer)
+  console.log(JSON.stringify({
+    ok: true,
+    status: response.status,
+    contentType: response.headers.get('content-type') ?? '',
+    bytes: buffer.length,
+    finalUrl: response.url,
+  }))
+} catch (error) {
+  console.log(JSON.stringify({
+    ok: false,
+    aborted: error.name === 'AbortError',
+    error: error.name + ': ' + error.message,
+  }))
+} finally {
+  clearTimeout(timer)
+}
+";
+
+    /// <summary>
+    /// Reads one field out of the helper's single-line JSON report. A missing or
+    /// non-numeric field yields <paramref name="fallback"/>.
+    /// </summary>
+    public static int ReadReportedNumber(string report, string key, int fallback)
+    {
+        if (String.IsNullOrEmpty(report))
+            return fallback;
+        Match match = Regex.Match(
+            report,
+            "\"" + Regex.Escape(key) + "\"\\s*:\\s*(\\d+)",
+            RegexOptions.CultureInvariant);
+        if (!match.Success)
+            return fallback;
+        int value;
+        return Int32.TryParse(match.Groups[1].Value, out value) ? value : fallback;
+    }
+
+    public static bool IsSuccessReport(string report, int expectedStatus)
+    {
+        if (String.IsNullOrEmpty(report))
+            return false;
+        return Regex.IsMatch(report, "\"ok\"\\s*:\\s*true", RegexOptions.CultureInvariant) &&
+            ReadReportedNumber(report, "status", 0) == expectedStatus;
+    }
+
+    /// <summary>True when the helper itself reported that it could not finish.</summary>
+    public static bool IsFailureReport(string report)
+    {
+        if (String.IsNullOrEmpty(report))
+            return true;
+        return Regex.IsMatch(report, "\"ok\"\\s*:\\s*false", RegexOptions.CultureInvariant);
+    }
+}
+
+public enum PluginSpecKind
+{
+    /// <summary>A bare npm package name, optionally with a dist-tag or version.</summary>
+    NpmPackage,
+    /// <summary>A GitHub shorthand or URL, which installs source and may need allowBuilds.</summary>
+    GitHubRepository,
+    /// <summary>A local directory.</summary>
+    LocalDirectory,
+    /// <summary>A packed tarball.</summary>
+    Tarball
+}
+
+/// <summary>
+/// Classifies the argument handed to <c>dsh plugin add</c>. The kind decides the
+/// install-time risk text: git sources run their prepare script outside any
+/// sandbox, so the confirmation must say so explicitly.
+/// </summary>
+public static class PluginSpecPolicy
+{
+    public static bool IsGitPrefixed(string spec)
+    {
+        return Regex.IsMatch(spec ?? "", "^(git\\+|github:|git@|https?://)", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// The git-hosted spec forms that the dsh CLI calls out when pnpm blocks a
+    /// prepare script. Mirrors the CLI's own test in apps/cli/src/plugin.ts.
+    /// </summary>
+    public static bool TriggersPrepareScript(string spec)
+    {
+        string candidate = spec ?? "";
+        return Regex.IsMatch(candidate, "^git\\+", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(candidate, "^github:", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(candidate, "\\.git(?:#|$)", RegexOptions.IgnoreCase);
+    }
+
+    public static PluginSpecKind Classify(string spec)
+    {
+        if (String.IsNullOrWhiteSpace(spec))
+            throw new InvalidOperationException("插件 spec 为空。");
+        string candidate = spec.Trim();
+
+        if (candidate.StartsWith("github:", StringComparison.OrdinalIgnoreCase) ||
+            candidate.StartsWith("git+", StringComparison.OrdinalIgnoreCase) ||
+            candidate.IndexOf("github.com/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            candidate.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+            return PluginSpecKind.GitHubRepository;
+
+        if (candidate.StartsWith("file:", StringComparison.OrdinalIgnoreCase) ||
+            candidate.StartsWith("link:", StringComparison.OrdinalIgnoreCase) ||
+            candidate.StartsWith(@".\", StringComparison.Ordinal) ||
+            candidate.StartsWith("./", StringComparison.Ordinal) ||
+            candidate.StartsWith(@"..\", StringComparison.Ordinal) ||
+            candidate.StartsWith("../", StringComparison.Ordinal) ||
+            Regex.IsMatch(candidate, "^[A-Za-z]:[\\\\/]"))
+        {
+            return candidate.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase)
+                ? PluginSpecKind.Tarball
+                : PluginSpecKind.LocalDirectory;
+        }
+
+        if (candidate.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ||
+            candidate.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+            return PluginSpecKind.Tarball;
+
+        return PluginSpecKind.NpmPackage;
+    }
+
+    /// <summary>
+    /// Whether installing this spec can execute third-party code at install time.
+    /// Only git sources run a prepare script, and pnpm gates that behind an
+    /// explicit allowBuilds entry.
+    /// </summary>
+    public static bool RequiresBuildAuthorization(string spec)
+    {
+        return Classify(spec) == PluginSpecKind.GitHubRepository;
+    }
+
+    /// <summary>
+    /// A bare npm package name, the one spec form that may be typed without a local
+    /// path or URL. Rejects anything that looks like a flag or a second argument so
+    /// a typed value can never inject extra pnpm arguments.
+    /// </summary>
+    public static bool IsSafePackageName(string candidate)
+    {
+        if (String.IsNullOrWhiteSpace(candidate))
+            return false;
+        string value = candidate.Trim();
+        if (value.StartsWith("-", StringComparison.Ordinal))
+            return false;
+        if (value.IndexOf(' ') >= 0 || value.IndexOf('\t') >= 0 || value.IndexOf(';') >= 0 ||
+            value.IndexOf('"') >= 0 || value.IndexOf('\'') >= 0 || value.IndexOf('&') >= 0 ||
+            value.IndexOf('|') >= 0 || value.IndexOf('>') >= 0 || value.IndexOf('<') >= 0)
+            return false;
+        // npm name, optionally scoped, optionally with @tag or @version.
+        return Regex.IsMatch(value, "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[A-Za-z0-9._^~*-]+)?$");
+    }
+
+    /// <summary>
+    /// One sentence describing what the user is about to install and the exposure it
+    /// carries. The git case must warn about install-time code execution.
+    /// </summary>
+    public static string DescribeInstallRisk(string spec)
+    {
+        PluginSpecKind kind = Classify(spec);
+        switch (kind)
+        {
+            case PluginSpecKind.GitHubRepository:
+                return "来源：Git 仓库（" + spec.Trim() + "）。" + Environment.NewLine +
+                    "该插件来自源码，安装时会运行它自己的构建脚本（prepare），" +
+                    "而且这一步在你的机器上执行、不在任何沙箱内。" + Environment.NewLine +
+                    "只对你信任的仓库授权，并尽量在 spec 上锁定 commit（例如 github:owner/repo#<sha>）。";
+            case PluginSpecKind.LocalDirectory:
+                return "来源：本地目录（" + spec.Trim() + "）。" + Environment.NewLine +
+                    "将把该目录链接进 profile。请确认这是你自己或你信任的插件源码。";
+            case PluginSpecKind.Tarball:
+                return "来源：本地压缩包（" + spec.Trim() + "）。" + Environment.NewLine +
+                    "将安装该压缩包中已构建好的内容，安装过程不会运行构建脚本。";
+            default:
+                return "来源：npm 包（" + spec.Trim() + "）。" + Environment.NewLine +
+                    "安装的是发布者预构建好的内容，安装过程不会运行构建脚本。";
+        }
+    }
+}
+
+public sealed class PluginCatalogEntry
+{
+    public string Name { get; private set; }
+    public string DisplayName { get; private set; }
+    public string Summary { get; private set; }
+    public string Spec { get; private set; }
+    public bool Official { get; private set; }
+    public bool RequiresBuildAuthorization { get; private set; }
+    public string Homepage { get; private set; }
+
+    public PluginCatalogEntry(
+        string name,
+        string displayName,
+        string summary,
+        string spec,
+        bool official,
+        bool requiresBuildAuthorization,
+        string homepage)
+    {
+        Name = name;
+        DisplayName = String.IsNullOrWhiteSpace(displayName) ? name : displayName;
+        Summary = summary ?? "";
+        Spec = spec ?? name;
+        Official = official;
+        RequiresBuildAuthorization = requiresBuildAuthorization;
+        Homepage = homepage ?? "";
+    }
+
+    /// <summary>Text shown in the marketplace list, where the package name is the identity.</summary>
+    public string ListLabel
+    {
+        get { return DisplayName + "  —  " + Name; }
+    }
+}
+
+/// <summary>
+/// The shipped, human-reviewed plugin list. It exists because npm metadata alone
+/// cannot identify installable plugins: the abbreviated search response omits the
+/// <c>dsh</c> field, so bundle detection needs a full packument fetch per candidate.
+/// Several official plugins (for example the Codex and Claude Code subagent
+/// providers) publish no <c>dsh</c> field at all and would be invisible to any
+/// purely automatic scan.
+/// </summary>
+public static class PluginCatalog
+{
+    private static readonly PluginCatalogEntry[] Entries = new[]
+    {
+        new PluginCatalogEntry(
+            "@deepseek-ai/dsh-subagent-codex",
+            "Codex 子代理提供方",
+            "通过官方 app-server 协议接入 Codex 的一次性子代理。",
+            "@deepseek-ai/dsh-subagent-codex", true, false,
+            "https://github.com/deepseek-ai/deepseek-harness"),
+        new PluginCatalogEntry(
+            "@deepseek-ai/dsh-subagent-claude-code",
+            "Claude Code 子代理提供方",
+            "通过官方 Agent SDK 接入 Claude Code 的一次性子代理。",
+            "@deepseek-ai/dsh-subagent-claude-code", true, false,
+            "https://github.com/deepseek-ai/deepseek-harness"),
+        new PluginCatalogEntry(
+            "@deepseek-ai/dsh-subagent-acp",
+            "ACP 子代理提供方",
+            "通过 ACP（Agent Client Protocol）接入外部代理的一次性子代理。",
+            "@deepseek-ai/dsh-subagent-acp", true, false,
+            "https://github.com/deepseek-ai/deepseek-harness"),
+        new PluginCatalogEntry(
+            "@deepseek-ai/dsh-experimental-agent-team-profile",
+            "Agent Teams（实验）",
+            "在 dsh-base 之上启用 Agent Teams 的实验性组合包。",
+            "@deepseek-ai/dsh-experimental-agent-team-profile", true, false,
+            "https://github.com/deepseek-ai/deepseek-harness"),
+        new PluginCatalogEntry(
+            "turtle-ui",
+            "turtle-ui（TUI 界面）",
+            "官方文档点名的终端界面示例组合包，可用来验证 git 安装流程。",
+            "turtle-ui", false, false,
+            "https://github.com/deepseek-harness/turtle-ui"),
+        new PluginCatalogEntry(
+            "turtle1999/turtle-ui",
+            "turtle-ui（GitHub 源码）",
+            "官方文档中作为 git 安装示例的仓库；从源码安装会触发构建授权。",
+            "github:turtle1999/turtle-ui", false, true,
+            "https://github.com/turtle1999/turtle-ui"),
+        new PluginCatalogEntry(
+            "PerryLink/dsh-plugin-guide",
+            "DSH 插件开发指南",
+            "可安装的组合包，内容是关于 DSH 插件开发的说明。",
+            "github:PerryLink/dsh-plugin-guide", false, true,
+            "https://github.com/PerryLink/dsh-plugin-guide"),
+        new PluginCatalogEntry(
+            "@nanmicoder/dsh-agent-teams",
+            "Agent Teams（第三方）",
+            "第三方实现的 Agent Teams 插件；来源为 npm。",
+            "@nanmicoder/dsh-agent-teams", false, false,
+            "https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams"),
+        new PluginCatalogEntry(
+            "@morlay/better-session",
+            "better-session",
+            "第三方会话增强插件；来源为 npm。",
+            "@morlay/better-session", false, false,
+            "https://www.npmjs.com/package/@morlay/better-session"),
+        new PluginCatalogEntry(
+            "dsh-knowledge",
+            "dsh-knowledge",
+            "第三方知识库/RAG 插件；来源为 npm。",
+            "dsh-knowledge", false, false,
+            "https://www.npmjs.com/package/dsh-knowledge")
+    };
+
+    public static List<PluginCatalogEntry> All()
+    {
+        return new List<PluginCatalogEntry>(Entries);
+    }
+
+    /// <summary>
+    /// Filters by a free-text query over name, display name, and summary. An empty
+    /// query returns everything, so the initial view shows the reviewed list.
+    /// </summary>
+    public static List<PluginCatalogEntry> Search(string query)
+    {
+        var results = new List<PluginCatalogEntry>();
+        string needle = (query ?? "").Trim();
+        foreach (PluginCatalogEntry entry in Entries)
+        {
+            if (needle.Length == 0 ||
+                entry.Name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                entry.DisplayName.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                entry.Summary.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                results.Add(entry);
+        }
+        return results;
+    }
+}
+
+public sealed class PluginRepository
+{
+    public string FullName { get; private set; }
+    public string Description { get; private set; }
+    public int Stars { get; private set; }
+    public string HtmlUrl { get; private set; }
+
+    public PluginRepository(string fullName, string description, int stars, string htmlUrl)
+    {
+        FullName = fullName ?? "";
+        Description = description ?? "";
+        Stars = stars;
+        HtmlUrl = htmlUrl ?? "";
+    }
+
+    /// <summary>
+    /// The spec that installs this repository. <c>dsh plugin</c> forwards it to pnpm,
+    /// which understands the <c>github:</c> shorthand.
+    /// </summary>
+    public string InstallSpec
+    {
+        get { return "github:" + FullName; }
+    }
+
+    public string ListLabel
+    {
+        get { return FullName + "  ★" + Stars; }
+    }
+}
+
+/// <summary>
+/// GitHub repository discovery. This is a discovery aid, not a trust boundary: a
+/// repository found here is unreviewed, so the UI must confirm the install-time
+/// code execution that a git source carries.
+/// </summary>
+public static class GitHubPluginPolicy
+{
+    /// <summary>
+    /// Queries that surface installable bundles first, most specific first.
+    /// <c>"dsh.bundle"</c> matches repositories that declare the bundle manifest
+    /// field, which is exactly the installable set.
+    /// </summary>
+    public static readonly string[] DefaultQueries = new[]
+    {
+        "\"dsh.bundle\"",
+        "dsh-base in:name,description",
+        "dsh plugin in:name,description"
+    };
+
+    public const string SearchEndpoint = "https://api.github.com/search/repositories";
+
+    /// <summary>
+    /// Builds a search URL. The query is percent-encoded, so a user-typed query
+    /// cannot inject extra query parameters.
+    /// </summary>
+    public static string BuildSearchUrl(string query, int perPage)
+    {
+        if (String.IsNullOrWhiteSpace(query))
+            throw new InvalidOperationException("搜索关键词为空。");
+        int size = perPage <= 0 ? 30 : Math.Min(perPage, 100);
+        return SearchEndpoint +
+            "?q=" + Uri.EscapeDataString(query.Trim()) +
+            "&sort=stars&order=desc&per_page=" + size;
+    }
+
+    /// <summary>
+    /// Parses a GitHub search response into repositories. A response with no
+    /// <c>items</c> array yields an empty list rather than throwing, so an empty
+    /// result set is not reported as a failure.
+    /// </summary>
+    public static List<PluginRepository> ParseSearchResponse(string json)
+    {
+        var results = new List<PluginRepository>();
+        if (String.IsNullOrWhiteSpace(json))
+            return results;
+
+        var serializer = new JavaScriptSerializer();
+        Dictionary<string, object> root;
+        try
+        {
+            root = serializer.DeserializeObject(json) as Dictionary<string, object>;
+        }
+        catch (ArgumentException)
+        {
+            throw new InvalidOperationException("GitHub 搜索返回的内容不是有效 JSON，可能是网络代理返回了错误页面。");
+        }
+        catch (InvalidOperationException)
+        {
+            throw new InvalidOperationException("GitHub 搜索返回的内容不是有效 JSON，可能是网络代理返回了错误页面。");
+        }
+
+        if (root == null)
+            return results;
+
+        object itemsValue;
+        if (!root.TryGetValue("items", out itemsValue))
+            return results;
+        object[] items = itemsValue as object[];
+        if (items == null)
+            return results;
+
+        foreach (object item in items)
+        {
+            var row = item as Dictionary<string, object>;
+            if (row == null)
+                continue;
+            string fullName = ReadString(row, "full_name");
+            if (String.IsNullOrWhiteSpace(fullName))
+                continue;
+            results.Add(new PluginRepository(
+                fullName,
+                ReadString(row, "description"),
+                ReadInt(row, "stargazers_count"),
+                ReadString(row, "html_url")));
+        }
+        return results;
+    }
+
+    private static string ReadString(Dictionary<string, object> row, string key)
+    {
+        object value;
+        if (!row.TryGetValue(key, out value) || value == null)
+            return "";
+        return value.ToString();
+    }
+
+    private static int ReadInt(Dictionary<string, object> row, string key)
+    {
+        object value;
+        if (!row.TryGetValue(key, out value) || value == null)
+            return 0;
+        int parsed;
+        return Int32.TryParse(value.ToString(), out parsed) ? parsed : 0;
+    }
+}
+
+/// <summary>
+/// Reads and updates a profile manifest. The manifest is the single source of truth
+/// for what is installed: <c>dsh.profile.bundles</c> is the ordered layer list, and
+/// <c>dependencies</c> holds the out-of-tree packages.
+///
+/// A bundle listed in <c>dsh.profile.bundles</c> but absent from
+/// <c>dependencies</c> is an in-box bundle resolved from the dsh installation
+/// itself (for example <c>@deepseek-ai/dsh-base</c>). Those must never be offered
+/// for removal, because pnpm does not own them.
+/// </summary>
+public static class ProfileManifestPolicy
+{
+    public static string ManifestPath(string dshHome, string profileName)
+    {
+        if (String.IsNullOrWhiteSpace(dshHome))
+            throw new InvalidOperationException("未配置 DSH_HOME。");
+        if (String.IsNullOrWhiteSpace(profileName))
+            throw new InvalidOperationException("profile 名称为空。");
+        return Path.Combine(dshHome, "profiles", profileName, "package.json");
+    }
+
+    /// <summary>
+    /// The profile whose bundles the running Harness actually composed. The panel
+    /// always launches <c>dsh web</c>, which is the hard-coded alias for this
+    /// profile.
+    /// </summary>
+    public const string DefaultProfileName = "web";
+
+    public static List<string> ReadBundles(string manifestJson)
+    {
+        var bundles = new List<string>();
+        object value = ReadPath(manifestJson, new[] { "dsh", "profile", "bundles" });
+        object[] array = value as object[];
+        if (array == null)
+            return bundles;
+        foreach (object item in array)
+        {
+            string name = item as string;
+            if (!String.IsNullOrWhiteSpace(name))
+                bundles.Add(name);
+        }
+        return bundles;
+    }
+
+    public static List<string> ReadDependencies(string manifestJson)
+    {
+        var names = new List<string>();
+        object value = ReadPath(manifestJson, new[] { "dependencies" });
+        var map = value as Dictionary<string, object>;
+        if (map == null)
+            return names;
+        foreach (KeyValuePair<string, object> pair in map)
+        {
+            if (!String.IsNullOrWhiteSpace(pair.Key))
+                names.Add(pair.Key);
+        }
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
+    }
+
+    /// <summary>
+    /// Bundles the user may remove: listed as a layer and owned by pnpm as a
+    /// dependency. In-box bundles fail the second test and are excluded.
+    /// </summary>
+    public static List<string> RemovableBundles(string manifestJson)
+    {
+        List<string> bundles = ReadBundles(manifestJson);
+        List<string> dependencies = ReadDependencies(manifestJson);
+        var removable = new List<string>();
+        foreach (string bundle in bundles)
+        {
+            if (dependencies.Any(name => String.Equals(name, bundle, StringComparison.OrdinalIgnoreCase)))
+                removable.Add(bundle);
+        }
+        return removable;
+    }
+
+    /// <summary>Bundles that come from the dsh installation and cannot be uninstalled.</summary>
+    public static List<string> InBoxBundles(string manifestJson)
+    {
+        List<string> bundles = ReadBundles(manifestJson);
+        List<string> removable = RemovableBundles(manifestJson);
+        var inBox = new List<string>();
+        foreach (string bundle in bundles)
+        {
+            if (!removable.Any(name => String.Equals(name, bundle, StringComparison.OrdinalIgnoreCase)))
+                inBox.Add(bundle);
+        }
+        return inBox;
+    }
+
+    /// <summary>One-line rendering of the layer stack for the log and status text.</summary>
+    public static string DescribeLayers(string manifestJson)
+    {
+        List<string> bundles = ReadBundles(manifestJson);
+        if (bundles.Count == 0)
+            return "profile 中没有配置任何组合包。";
+        List<string> removable = RemovableBundles(manifestJson);
+        var lines = new List<string>();
+        int index = 1;
+        foreach (string bundle in bundles)
+        {
+            bool external = removable.Any(name => String.Equals(name, bundle, StringComparison.OrdinalIgnoreCase));
+            lines.Add(index + ". " + bundle + (external ? "（外部，可卸载）" : "（内置，不可卸载）"));
+            index++;
+        }
+        return String.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    private static object ReadPath(string json, string[] path)
+    {
+        if (String.IsNullOrWhiteSpace(json))
+            return null;
+        var serializer = new JavaScriptSerializer();
+        Dictionary<string, object> current;
+        try
+        {
+            current = serializer.DeserializeObject(json) as Dictionary<string, object>;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < path.Length; i++)
+        {
+            if (current == null)
+                return null;
+            object value;
+            if (!current.TryGetValue(path[i], out value))
+                return null;
+            if (i == path.Length - 1)
+                return value;
+            current = value as Dictionary<string, object>;
+        }
+        return null;
+    }
+}
+
 public static class StateSecretProtection
 {
     private const string Prefix = "dpapi:";
-
     public static string Protect(string value)
     {
         if (String.IsNullOrEmpty(value))
@@ -498,6 +1241,7 @@ public sealed class ManagerForm : Form
     private readonly Button rescanButton = new Button();
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
+    private readonly Button marketplaceButton = new Button();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -507,6 +1251,14 @@ public sealed class ManagerForm : Form
     private string selectedPnpm = "";
     private string selectedCorepack = "";
     private string selectedSourceCommit = "";
+    private string nodeHelperPath = "";
+
+    /// <summary>
+    /// Set once a request proves the .NET Framework TLS stack cannot complete a
+    /// handshake on this machine. From then on every outbound request goes through
+    /// the Node helper without paying a failed attempt first.
+    /// </summary>
+    private bool nodeTransportRequired;
 
     public ManagerForm()
     {
@@ -602,6 +1354,7 @@ public sealed class ManagerForm : Form
         AddButton(buttons, openButton, "打开页面", OpenClick);
         AddButton(buttons, rescanButton, "重新扫描", RescanClick);
         AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
+        AddButton(buttons, marketplaceButton, "插件市场", MarketplaceClick);
         main.Controls.Add(buttons, 0, 4);
 
         logBox.ReadOnly = true;
@@ -743,6 +1496,42 @@ public sealed class ManagerForm : Form
             Process.Start("explorer.exe", "\"" + Root + "\"");
     }
 
+    /// <summary>
+    /// Opens the plugin marketplace. It installs through <c>dsh plugin</c> inside the
+    /// installed CLI, so it needs the same Node and pnpm environment the rest of the
+    /// panel prepares.
+    /// </summary>
+    private void MarketplaceClick(object sender, EventArgs e)
+    {
+        if (!IsInstalled() || !IsInstallationReady())
+        {
+            ShowInfo("请先完成 Harness 安装或修复，再管理插件。");
+            return;
+        }
+        string dshHome = Environment.GetEnvironmentVariable("DSH_HOME");
+        if (String.IsNullOrWhiteSpace(dshHome))
+        {
+            dshHome = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".dsh");
+        }
+        try
+        {
+            using (var marketplace = new PluginMarketplaceForm(
+                Source,
+                dshHome,
+                selectedNodeDirectory,
+                selectedPnpm,
+                selectedCorepack,
+                FetchTextAsync))
+                marketplace.ShowDialog(this);
+        }
+        catch (Exception ex)
+        {
+            ShowInfo("无法打开插件市场：" + Environment.NewLine + FlattenException(ex));
+        }
+    }
+
     private void UninstallClick(object sender, EventArgs e)
     {
         if (!IsInstalled())
@@ -859,6 +1648,8 @@ public sealed class ManagerForm : Form
         rescanButton.Enabled = enabled;
         openFolderButton.Enabled = enabled && Directory.Exists(Root);
         uninstallButton.Enabled = enabled && installed && !multiple;
+        // The marketplace drives `dsh plugin`, which needs the installed CLI.
+        marketplaceButton.Enabled = enabled && ready && !multiple;
     }
 
     private void Log(string message)
@@ -1384,7 +2175,7 @@ public sealed class ManagerForm : Form
     private async Task<string> DownloadNodeAsync()
     {
         Log("查询官方 Node.js Windows 版本...");
-        string json = await http.GetStringAsync(NodeIndex);
+        string json = await FetchTextAsync(NodeIndex);
         var serializer = new JavaScriptSerializer();
         var entries = serializer.DeserializeObject(json) as object[];
         string version = null;
@@ -1416,7 +2207,7 @@ public sealed class ManagerForm : Form
             throw new InvalidOperationException("无法读取 Node.js 官方 LTS 版本列表。");
         string url = "https://nodejs.org/dist/" + version + "/node-" + version + "-win-x64.zip";
         string zip = Path.Combine(Path.GetTempPath(), "dsh-node-" + version + ".zip");
-        await DownloadFileAsync(url, zip);
+        await DownloadFileAsync(url, zip, true);
         return zip;
     }
 
@@ -1516,7 +2307,7 @@ public sealed class ManagerForm : Form
         string extract = Path.Combine(Path.GetTempPath(), "dsh-extract-" + Guid.NewGuid().ToString("N"));
         try
         {
-            await DownloadFileAsync(String.Format(RepoZipTemplate, Uri.EscapeDataString(branch)), zip);
+            await DownloadFileAsync(String.Format(RepoZipTemplate, Uri.EscapeDataString(branch)), zip, true);
             Directory.CreateDirectory(extract);
             ZipFile.ExtractToDirectory(zip, extract);
             string root = Directory.GetDirectories(extract)[0];
@@ -2074,8 +2865,147 @@ public sealed class ManagerForm : Form
         }
     }
 
-    private async Task DownloadFileAsync(string url, string path)
+    /// <summary>
+    /// Working directory for the fetch helper, its request files, and in-memory
+    /// response files. Building a path here never creates the directory: with a
+    /// working .NET transport nothing is ever staged, so the mere act of asking
+    /// must not leave an empty folder behind in %TEMP%.
+    /// </summary>
+    private string NetworkScratchDirectory()
     {
+        return Path.Combine(Path.GetTempPath(), "dsh-manager");
+    }
+
+    /// <summary>
+    /// Creates the scratch directory. Callers invoke this immediately before their
+    /// first write so the directory appears only when something is really staged.
+    /// </summary>
+    private string EnsureNetworkScratchDirectory()
+    {
+        string directory = NetworkScratchDirectory();
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    /// <summary>
+    /// Writes the fetch helper once per session and returns its path. The helper is
+    /// delivered from the compiled assembly so the panel stays a single file.
+    /// </summary>
+    private string NodeHelperFilePath()
+    {
+        if (!String.IsNullOrEmpty(nodeHelperPath) && File.Exists(nodeHelperPath))
+            return nodeHelperPath;
+        string path = Path.Combine(EnsureNetworkScratchDirectory(), "fetch-helper.mjs");
+        File.WriteAllText(path, NodeNetworkPolicy.HelperScript, new UTF8Encoding(false));
+        nodeHelperPath = path;
+        return path;
+    }
+
+    /// <summary>
+    /// Whether outbound requests must use the Node transport. Requires the helper
+    /// file to be writable, which is the same requirement the panel already has for
+    /// its staging directories.
+    /// </summary>
+    private bool ShouldUseNodeTransport()
+    {
+        if (!nodeTransportRequired)
+            return false;
+        try
+        {
+            NodeHelperFilePath();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log("无法准备 Node 网络通道: " + ex.Message);
+            return false;
+        }
+    }
+
+    private void RequireNodeTransport(Exception error)
+    {
+        if (nodeTransportRequired)
+            return;
+        nodeTransportRequired = true;
+        Log("检测到本机 .NET 的 TLS 连接失败（通常是代理的 TUN/fake-IP 与 Windows SCHANNEL 不兼容）。");
+        Log("已切换到 Node 网络通道继续请求；本地 Harness 页面访问不受影响。");
+        if (error != null)
+            Log("原始错误: " + FlattenException(error));
+    }
+
+    /// <summary>
+    /// Fetches <paramref name="url"/> to <paramref name="path"/> through the Node
+    /// helper. Runs out of process so a stalled socket cannot wedge the UI thread.
+    /// </summary>
+    private async Task FetchToFileViaNodeAsync(string url, string path, int timeoutSeconds)
+    {
+        string helper = NodeHelperFilePath();
+        string requestFile = Path.Combine(
+            EnsureNetworkScratchDirectory(),
+            "request-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(
+                requestFile,
+                NodeNetworkPolicy.BuildRequestJson(url, path, timeoutSeconds, NodeNetworkPolicy.UserAgent),
+                new UTF8Encoding(false));
+
+            string arguments = NodeNetworkPolicy.QuoteArgument(helper) + " " + NodeNetworkPolicy.QuoteArgument(requestFile);
+            ProcessStartInfo psi = NewNodeProcess(arguments, Root);
+            ProcessExecutionResult result = await RunProcessDetailedAsync(psi);
+            string report = (result.StandardOutput ?? "").Trim();
+
+            if (result.ExitCode != 0 || NodeNetworkPolicy.IsFailureReport(report))
+            {
+                string detail = report;
+                if (String.IsNullOrWhiteSpace(detail))
+                    detail = (result.StandardError ?? "").Trim();
+                throw new InvalidOperationException(
+                    "Node 网络通道请求失败" +
+                    (String.IsNullOrWhiteSpace(detail) ? "。" : "：" + Environment.NewLine + detail) +
+                    Environment.NewLine + "地址: " + url);
+            }
+
+            int status = NodeNetworkPolicy.ReadReportedNumber(report, "status", 0);
+            if (status < 200 || status >= 300)
+                throw new InvalidOperationException("下载失败，服务器返回 HTTP " + status + "。" + Environment.NewLine + "地址: " + url);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(requestFile))
+                    File.Delete(requestFile);
+            }
+            catch
+            {
+                // A leftover request file is harmless; never mask the fetch outcome.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Downloads to a file, preferring .NET and permanently switching to the Node
+    /// transport when the local TLS stack cannot complete a handshake.
+    ///
+    /// <paramref name="ensureDestinationDirectory"/> is false for scratch requests
+    /// whose directory is created only if the Node transport actually stages
+    /// something, so routing a request through here never leaves an empty folder
+    /// behind in %TEMP%.
+    /// </summary>
+    private async Task DownloadFileAsync(string url, string path, bool ensureDestinationDirectory)
+    {
+        string parent = Path.GetDirectoryName(path);
+        if (ensureDestinationDirectory && !String.IsNullOrEmpty(parent))
+            Directory.CreateDirectory(parent);
+
+        if (ShouldUseNodeTransport())
+        {
+            await FetchToFileViaNodeAsync(url, path, NodeNetworkPolicy.DefaultTimeoutSeconds);
+            return;
+        }
+
+        Exception tlsFailure = null;
         try
         {
             using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
@@ -2088,10 +3018,54 @@ public sealed class ManagerForm : Form
                     await input.CopyToAsync(output);
                 }
             }
+            return;
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex)
         {
-            throw new InvalidOperationException("无法建立 HTTPS 连接，请检查网络代理、证书或防火墙设置。" + Environment.NewLine + FlattenException(ex));
+            // This compiler targets C# 5: no exception filters, and no await inside
+            // a catch block. Record the decision and fall back after the handler.
+            //
+            // The transport test must run over the whole chain and run FIRST:
+            // HttpClient wraps the SCHANNEL failure in an HttpRequestException whose
+            // own message is only "发送请求时出错。", so a top-level check would miss
+            // it and misreport a broken TLS stack as an unconnectable server.
+            if (NodeNetworkPolicy.IsTlsStackFailure(ex))
+                tlsFailure = ex;
+            else if (ex is HttpRequestException)
+                throw new InvalidOperationException("无法建立 HTTPS 连接，请检查网络代理、证书或防火墙设置。" + Environment.NewLine + FlattenException(ex));
+            else
+                throw;
+        }
+
+        RequireNodeTransport(tlsFailure);
+        await FetchToFileViaNodeAsync(url, path, NodeNetworkPolicy.DefaultTimeoutSeconds);
+    }
+
+    /// <summary>
+    /// Fetches a small text resource through the same transport rules as
+    /// <see cref="DownloadFileAsync"/>, for API responses that are parsed in memory.
+    /// </summary>
+    private async Task<string> FetchTextAsync(string url)
+    {
+        string temporary = Path.Combine(
+            NetworkScratchDirectory(),
+            "response-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            await DownloadFileAsync(url, temporary, false);
+            return File.ReadAllText(temporary);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporary))
+                    File.Delete(temporary);
+            }
+            catch
+            {
+                // A leftover response file is harmless; never mask the request outcome.
+            }
         }
     }
 
@@ -2100,14 +3074,13 @@ public sealed class ManagerForm : Form
         string json;
         try
         {
-            using (var response = await http.GetAsync(RepoInfoApi))
-            {
-                if (!response.IsSuccessStatusCode)
-                    throw new InvalidOperationException("GitHub 返回 " + (int)response.StatusCode + " " + response.ReasonPhrase + "。");
-                json = await response.Content.ReadAsStringAsync();
-            }
+            json = await FetchTextAsync(RepoInfoApi);
         }
-        catch (HttpRequestException ex)
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             throw new InvalidOperationException("无法连接 GitHub 官方仓库信息接口。" + Environment.NewLine + FlattenException(ex));
         }
@@ -2122,14 +3095,13 @@ public sealed class ManagerForm : Form
         string json;
         try
         {
-            using (var response = await http.GetAsync(String.Format(RepoApiTemplate, Uri.EscapeDataString(branch))))
-            {
-                if (!response.IsSuccessStatusCode)
-                    throw new InvalidOperationException("GitHub 返回 " + (int)response.StatusCode + " " + response.ReasonPhrase + "。");
-                json = await response.Content.ReadAsStringAsync();
-            }
+            json = await FetchTextAsync(String.Format(RepoApiTemplate, Uri.EscapeDataString(branch)));
         }
-        catch (HttpRequestException ex)
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             throw new InvalidOperationException("无法连接 GitHub 官方更新接口，请检查网络代理、证书或防火墙设置。" + Environment.NewLine + FlattenException(ex));
         }
@@ -2457,6 +3429,645 @@ public sealed class ManagerForm : Form
             return;
         }
         MessageBox.Show(this, text, "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+}
+
+/// <summary>
+/// Plugin marketplace window. Every mutation goes through
+/// <c>dsh plugin --profile web</c>, which forwards to pnpm inside the profile; the
+/// panel never edits the profile manifest itself, so the CLI stays the single
+/// owner of the bundle layer list.
+/// </summary>
+public sealed class PluginMarketplaceForm : Form
+{
+    private readonly string source;
+    private readonly string dshHome;
+    private readonly string nodeDirectory;
+    private readonly string pnpmPath;
+    private readonly string corepackPath;
+
+    private readonly TextBox searchBox = new TextBox();
+    private readonly Button searchButton = new Button();
+    private readonly Button clearButton = new Button();
+    private readonly CheckBox githubToggle = new CheckBox();
+    private readonly ListBox resultList = new ListBox();
+    private readonly TextBox detailBox = new TextBox();
+    private readonly Button installButton = new Button();
+    private readonly Button removeButton = new Button();
+    private readonly Button refreshButton = new Button();
+    private readonly Button restartHintButton = new Button();
+    private readonly RichTextBox logBox = new RichTextBox();
+    private readonly Label statusLabel = new Label();
+
+    private readonly string manifestFile;
+    private readonly object gate = new object();
+    private bool busy;
+    private List<PluginCatalogEntry> catalogEntries = new List<PluginCatalogEntry>();
+    private List<PluginRepository> repositories = new List<PluginRepository>();
+    private string installedManifest = "";
+
+    /// <summary>
+    /// Fetches a text resource through the panel's own transport, so the marketplace
+    /// shares the .NET-then-Node HTTP fallback instead of duplicating it.
+    /// </summary>
+    private readonly Func<string, Task<string>> fetchTextResolver;
+
+    public PluginMarketplaceForm(
+        string source,
+        string dshHome,
+        string nodeDirectory,
+        string pnpmPath,
+        string corepackPath,
+        Func<string, Task<string>> fetchTextResolver)
+    {
+        this.source = source;
+        this.dshHome = dshHome;
+        this.nodeDirectory = nodeDirectory;
+        this.pnpmPath = pnpmPath;
+        this.corepackPath = corepackPath;
+        this.fetchTextResolver = fetchTextResolver;
+        manifestFile = ProfileManifestPolicy.ManifestPath(dshHome, ProfileManifestPolicy.DefaultProfileName);
+
+        Text = "插件市场 — DeepSeek Harness";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        Width = 980;
+        Height = 680;
+        MinimumSize = new Size(860, 560);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Microsoft YaHei UI", 9F);
+
+        BuildUi();
+        LoadInstalledManifest();
+        PopulateCatalog("");
+        Log("插件市场已打开。");
+        Log("profile: " + ProfileManifestPolicy.DefaultProfileName + "（即 dsh web 使用的 profile）");
+        Log("配置文件: " + manifestFile);
+        Log("已安装的组合包层：" + Environment.NewLine + ProfileManifestPolicy.DescribeLayers(installedManifest));
+        Log("提示：组合包成员变化后需要重启 Harness 才会生效。");
+    }
+
+    private void BuildUi()
+    {
+        var main = new TableLayoutPanel();
+        main.Dock = DockStyle.Fill;
+        main.Padding = new Padding(12);
+        main.ColumnCount = 1;
+        main.RowCount = 4;
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
+        Controls.Add(main);
+
+        // Row 0: search controls.
+        var searchRow = new TableLayoutPanel();
+        searchRow.Dock = DockStyle.Fill;
+        searchRow.ColumnCount = 6;
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        searchRow.Controls.Add(new Label { Text = "搜索", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        searchBox.Dock = DockStyle.Fill;
+        searchBox.TextChanged += delegate { PopulateCatalog(searchBox.Text); };
+        searchRow.Controls.Add(searchBox, 1, 0);
+        AddButton(searchRow, searchButton, "搜索", SearchClick);
+        searchRow.Controls.Add(searchButton, 2, 0);
+        AddButton(searchRow, clearButton, "清空", ClearClick);
+        searchRow.Controls.Add(clearButton, 3, 0);
+        githubToggle.Text = "在 GitHub 搜索仓库";
+        githubToggle.Dock = DockStyle.Fill;
+        githubToggle.CheckedChanged += delegate { UpdateSearchModeText(); };
+        searchRow.Controls.Add(githubToggle, 4, 0);
+        statusLabel.Dock = DockStyle.Fill;
+        statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        searchRow.Controls.Add(statusLabel, 5, 0);
+        main.Controls.Add(searchRow, 0, 0);
+
+        // Row 1: result list and details.
+        var split = new SplitContainer();
+        split.Dock = DockStyle.Fill;
+        split.Orientation = Orientation.Vertical;
+        split.SplitterDistance = 380;
+        resultList.Dock = DockStyle.Fill;
+        resultList.IntegralHeight = false;
+        resultList.SelectedIndexChanged += delegate { ShowSelectedDetail(); };
+        split.Panel1.Controls.Add(resultList);
+        detailBox.Dock = DockStyle.Fill;
+        detailBox.Multiline = true;
+        detailBox.ReadOnly = true;
+        detailBox.ScrollBars = ScrollBars.Vertical;
+        detailBox.WordWrap = true;
+        detailBox.BackColor = Color.White;
+        split.Panel2.Controls.Add(detailBox);
+        main.Controls.Add(split, 0, 1);
+
+        // Row 2: actions.
+        var actions = new FlowLayoutPanel();
+        actions.Dock = DockStyle.Fill;
+        actions.WrapContents = false;
+        AddButton(actions, installButton, "安装所选", InstallClick);
+        AddButton(actions, removeButton, "卸载所选", RemoveClick);
+        AddButton(actions, refreshButton, "刷新已安装", RefreshClick);
+        AddButton(actions, restartHintButton, "重启 Harness", RestartHintClick);
+        main.Controls.Add(actions, 0, 2);
+
+        // Row 3: log.
+        logBox.ReadOnly = true;
+        logBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+        logBox.WordWrap = true;
+        logBox.Dock = DockStyle.Fill;
+        logBox.BackColor = Color.White;
+        main.Controls.Add(logBox, 0, 3);
+
+        UpdateSearchModeText();
+        SetBusy(false);
+    }
+
+    private void AddButton(Control parent, Button button, string text, EventHandler handler)
+    {
+        button.Text = text;
+        button.AutoSize = true;
+        button.Height = 30;
+        button.Click += handler;
+        parent.Controls.Add(button);
+    }
+
+    /// <summary>Root containing the built CLI. The panel's install root is the source tree.</summary>
+    private string DshCliPath()
+    {
+        return Path.Combine(source, "apps", "cli", "lib", "bin.js");
+    }
+
+    private string NodeExecutable()
+    {
+        if (!String.IsNullOrWhiteSpace(nodeDirectory))
+        {
+            string candidate = Path.Combine(nodeDirectory, "node.exe");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+        foreach (string folder in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+        {
+            if (String.IsNullOrWhiteSpace(folder))
+                continue;
+            try
+            {
+                string candidate = Path.Combine(folder.Trim().Trim('"'), "node.exe");
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private void Log(string message)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke((Action)delegate { Log(message); });
+            return;
+        }
+        foreach (string line in (message ?? "").Replace("\r\n", "\n").Split('\n'))
+        {
+            if (String.IsNullOrWhiteSpace(line))
+                continue;
+            logBox.SelectionStart = logBox.TextLength;
+            logBox.SelectionLength = 0;
+            logBox.SelectionColor = Color.Black;
+            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + line + Environment.NewLine);
+        }
+        logBox.SelectionColor = logBox.ForeColor;
+        logBox.ScrollToCaret();
+    }
+
+    private void SetBusy(bool value)
+    {
+        busy = value;
+        installButton.Enabled = !value;
+        removeButton.Enabled = !value;
+        refreshButton.Enabled = !value;
+        searchButton.Enabled = !value;
+        githubToggle.Enabled = !value;
+        resultList.Enabled = !value;
+        UseWaitCursor = value;
+    }
+
+    private void RunAsync(string title, Func<Task> action)
+    {
+        lock (gate)
+        {
+            if (busy)
+            {
+                MessageBox.Show(this, "当前已有操作正在执行，请等待完成。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            busy = true;
+        }
+        SetBusy(true);
+        Log(title + "...");
+        Task.Run(action).ContinueWith(delegate(Task task)
+        {
+            BeginInvoke((Action)delegate
+            {
+                SetBusy(false);
+                if (task.IsFaulted)
+                {
+                    string message = task.Exception == null ? "未知错误" : task.Exception.GetBaseException().Message;
+                    Log("失败：" + message);
+                    MessageBox.Show(this, message, "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                else
+                {
+                    Log("完成。");
+                }
+                LoadInstalledManifest();
+                RefreshListOnly();
+            });
+        });
+    }
+
+    private void LoadInstalledManifest()
+    {
+        try
+        {
+            installedManifest = File.Exists(manifestFile) ? File.ReadAllText(manifestFile) : "";
+        }
+        catch (Exception ex)
+        {
+            installedManifest = "";
+            Log("读取 profile 配置失败: " + ex.Message);
+        }
+    }
+
+    private List<string> InstalledRemovableBundles()
+    {
+        return ProfileManifestPolicy.RemovableBundles(installedManifest);
+    }
+
+    private bool IsInstalledBundle(string name)
+    {
+        List<string> bundles = ProfileManifestPolicy.ReadBundles(installedManifest);
+        return bundles.Any(bundle => String.Equals(bundle, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void UpdateSearchModeText()
+    {
+        searchButton.Text = githubToggle.Checked ? "搜索 GitHub" : "过滤";
+    }
+
+    /// <summary>
+    /// Renders curated entries. The text box filters locally so typing narrows the
+    /// reviewed list without a network round trip.
+    /// </summary>
+    private void PopulateCatalog(string query)
+    {
+        catalogEntries = PluginCatalog.Search(query);
+        repositories = new List<PluginRepository>();
+        resultList.BeginUpdate();
+        resultList.Items.Clear();
+        foreach (PluginCatalogEntry entry in catalogEntries)
+        {
+            string state = IsInstalledBundle(entry.Name) ? "[已安装] " : "";
+            string origin = entry.Official ? "官方" : "第三方";
+            resultList.Items.Add(state + entry.ListLabel + "  (" + origin + ")");
+        }
+        resultList.EndUpdate();
+        if (catalogEntries.Count > 0)
+            resultList.SelectedIndex = 0;
+        else
+            detailBox.Text = "没有匹配的插件。可以勾选“在 GitHub 搜索仓库”再按回车或点击按钮，去 GitHub 上找。";
+    }
+
+    private void PopulateRepositories()
+    {
+        resultList.BeginUpdate();
+        resultList.Items.Clear();
+        foreach (PluginRepository repository in repositories)
+            resultList.Items.Add(repository.ListLabel);
+        resultList.EndUpdate();
+        if (repositories.Count > 0)
+            resultList.SelectedIndex = 0;
+        else
+            detailBox.Text = "GitHub 没有返回结果。";
+    }
+
+    private void RefreshListOnly()
+    {
+        if (githubToggle.Checked && repositories.Count > 0)
+            PopulateRepositories();
+        else
+            PopulateCatalog(searchBox.Text);
+    }
+
+    private string SelectedSpec()
+    {
+        int index = resultList.SelectedIndex;
+        if (index < 0)
+            return "";
+        if (githubToggle.Checked && index < repositories.Count)
+            return repositories[index].InstallSpec;
+        if (index < catalogEntries.Count)
+            return catalogEntries[index].Spec;
+        return "";
+    }
+
+    private void ShowSelectedDetail()
+    {
+        int index = resultList.SelectedIndex;
+        if (index < 0)
+        {
+            detailBox.Text = "";
+            return;
+        }
+        var lines = new List<string>();
+
+        if (githubToggle.Checked && index < repositories.Count)
+        {
+            PluginRepository repository = repositories[index];
+            lines.Add("GitHub 仓库");
+            lines.Add("名称: " + repository.FullName);
+            lines.Add("Star: " + repository.Stars);
+            lines.Add("地址: " + repository.HtmlUrl);
+            lines.Add("");
+            lines.Add("简介: " + (String.IsNullOrWhiteSpace(repository.Description) ? "(无)" : repository.Description));
+            lines.Add("");
+            lines.Add("将使用的 spec: " + repository.InstallSpec);
+            lines.Add("");
+            lines.Add(PluginSpecPolicy.DescribeInstallRisk(repository.InstallSpec));
+            lines.Add("");
+            lines.Add("注意：GitHub 搜索结果是未经审核的第三方代码。");
+            lines.Add("安装前请先打开仓库确认它声明了 dsh.bundle，并检查其内容。");
+        }
+        else if (index < catalogEntries.Count)
+        {
+            PluginCatalogEntry entry = catalogEntries[index];
+            lines.Add("精选插件");
+            lines.Add("名称: " + entry.Name);
+            lines.Add("标题: " + entry.DisplayName);
+            lines.Add("来源: " + (entry.Official ? "官方" : "第三方（已人工确认）"));
+            lines.Add("spec: " + entry.Spec);
+            if (!String.IsNullOrWhiteSpace(entry.Homepage))
+                lines.Add("主页: " + entry.Homepage);
+            lines.Add("");
+            lines.Add("简介: " + entry.Summary);
+            lines.Add("");
+            bool installed = IsInstalledBundle(entry.Name);
+            lines.Add("当前状态: " + (installed ? "已安装" : "未安装"));
+            if (installed)
+            {
+                bool removable = InstalledRemovableBundles().Any(
+                    name => String.Equals(name, entry.Name, StringComparison.OrdinalIgnoreCase));
+                lines.Add("可否卸载: " + (removable ? "可以（外部组合包）" : "不可以（内置组合包，由 dsh 安装目录提供）"));
+            }
+            lines.Add("");
+            lines.Add(PluginSpecPolicy.DescribeInstallRisk(entry.Spec));
+        }
+
+        detailBox.Text = String.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    private void ClearClick(object sender, EventArgs e)
+    {
+        searchBox.Text = "";
+        githubToggle.Checked = false;
+        PopulateCatalog("");
+    }
+
+    private void RefreshClick(object sender, EventArgs e)
+    {
+        LoadInstalledManifest();
+        RefreshListOnly();
+        Log("已重新读取 profile 配置。");
+        Log("已安装的组合包层：" + Environment.NewLine + ProfileManifestPolicy.DescribeLayers(installedManifest));
+    }
+
+    private void RestartHintClick(object sender, EventArgs e)
+    {
+        MessageBox.Show(
+            this,
+            "请在主窗口中点击“重启”，让新的组合包层生效。",
+            "插件市场",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    /// <summary>
+    /// Searches GitHub. The default query targets repositories that declare the
+    /// bundle manifest field, which is the installable set.
+    /// </summary>
+    private void SearchClick(object sender, EventArgs e)
+    {
+        if (!githubToggle.Checked)
+        {
+            PopulateCatalog(searchBox.Text);
+            return;
+        }
+        string query = searchBox.Text.Trim();
+        if (query.Length == 0)
+            query = GitHubPluginPolicy.DefaultQueries[0];
+        RunAsync("正在搜索 GitHub 仓库（" + query + "）", delegate { return SearchGitHubAsync(query); });
+    }
+
+    private async Task SearchGitHubAsync(string query)
+    {
+        string url = GitHubPluginPolicy.BuildSearchUrl(query, 30);
+        string json = await fetchTextResolver(url);
+        List<PluginRepository> found = GitHubPluginPolicy.ParseSearchResponse(json);
+        repositories = found;
+        catalogEntries = new List<PluginCatalogEntry>();
+        Log("GitHub 返回 " + found.Count + " 个仓库。");
+        if (found.Count == 0)
+            Log("可以换个关键词，例如 " + GitHubPluginPolicy.DefaultQueries[0] + " 或插件名。");
+    }
+
+    private void InstallClick(object sender, EventArgs e)
+    {
+        string spec = SelectedSpec();
+        if (String.IsNullOrWhiteSpace(spec))
+        {
+            MessageBox.Show(this, "请先在上方列表中选择一个插件。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!PluginSpecPolicy.IsSafePackageName(spec) &&
+            PluginSpecPolicy.Classify(spec) == PluginSpecKind.NpmPackage)
+        {
+            MessageBox.Show(this, "这个 npm 包名包含不安全字符，已拒绝安装。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        string prompt = "即将安装：" + Environment.NewLine + spec + Environment.NewLine + Environment.NewLine +
+            PluginSpecPolicy.DescribeInstallRisk(spec) + Environment.NewLine + Environment.NewLine +
+            "安装完成后需要重启 Harness 才会生效。确定继续吗？";
+        DialogResult answer = MessageBox.Show(this, prompt, "确认安装插件", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (answer != DialogResult.Yes)
+            return;
+        RunAsync("正在安装插件 " + spec, delegate { return InstallPluginAsync(spec); });
+    }
+
+    private async Task InstallPluginAsync(string spec)
+    {
+        int exitCode = await RunDshPluginAsync(new[] { "add", spec });
+        if (exitCode == 0)
+        {
+            LoadInstalledManifest();
+            Log("插件已安装: " + spec);
+            Log("当前组合包层：" + Environment.NewLine + ProfileManifestPolicy.DescribeLayers(installedManifest));
+            Log("请回到主窗口点击“重启”，让该插件生效。");
+            MessageBox.Show(
+                this,
+                "插件已安装。" + Environment.NewLine + Environment.NewLine +
+                "请回到主窗口点击“重启”让插件生效。" + Environment.NewLine +
+                "若该插件提供工具，还需在 agent preset 中启用对应工具行，agent 才能看到它。",
+                "插件市场",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        // pnpm >= 10 blocks a git dependency's prepare script until the profile
+        // allowlists it. The CLI names the file; surface the exact remedy.
+        if (PluginSpecPolicy.TriggersPrepareScript(spec))
+        {
+            string workspaceFile = Path.Combine(Path.GetDirectoryName(manifestFile), "pnpm-workspace.yaml");
+            Log("该插件来自 Git 源码，pnpm 默认阻止它自己的构建脚本。");
+            Log("上面的 pnpm 输出会给出需要加入 allowBuilds 的包键。");
+            Log("把那个键加入: " + workspaceFile);
+            Log("格式为：" + Environment.NewLine + "allowBuilds:" + Environment.NewLine + "  <包名>: true");
+            Log("然后回到这里重新安装。授权等于允许该包代码在你的机器上执行，请只对可信来源授权。");
+        }
+        throw new InvalidOperationException("dsh plugin add 失败，退出码 " + exitCode + "。请查看上方日志。");
+    }
+
+    private void RemoveClick(object sender, EventArgs e)
+    {
+        int index = resultList.SelectedIndex;
+        string name = "";
+        if (githubToggle.Checked)
+        {
+            MessageBox.Show(this, "GitHub 搜索结果不能直接卸载。请切换到精选列表，或到“已安装”条目上操作。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (index >= 0 && index < catalogEntries.Count)
+            name = catalogEntries[index].Name;
+        if (String.IsNullOrWhiteSpace(name))
+        {
+            MessageBox.Show(this, "请先在上方列表中选择一个插件。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!IsInstalledBundle(name))
+        {
+            MessageBox.Show(this, name + " 当前没有安装。", "插件市场", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!InstalledRemovableBundles().Any(item => String.Equals(item, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            MessageBox.Show(
+                this,
+                name + " 是内置组合包，由 dsh 安装目录提供，不能卸载。",
+                "插件市场",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        string prompt = "即将卸载：" + Environment.NewLine + name + Environment.NewLine + Environment.NewLine +
+            "会同时移除该依赖和它贡献的配置层。卸载后需要重启 Harness 才会生效。" + Environment.NewLine +
+            "确定继续吗？";
+        if (MessageBox.Show(this, prompt, "确认卸载插件", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        RunAsync("正在卸载插件 " + name, delegate { return RemovePluginAsync(name); });
+    }
+
+    private async Task RemovePluginAsync(string name)
+    {
+        int exitCode = await RunDshPluginAsync(new[] { "remove", name });
+        if (exitCode != 0)
+            throw new InvalidOperationException("dsh plugin remove 失败，退出码 " + exitCode + "。请查看上方日志。");
+        LoadInstalledManifest();
+        Log("插件已卸载: " + name);
+        Log("当前组合包层：" + Environment.NewLine + ProfileManifestPolicy.DescribeLayers(installedManifest));
+        Log("请回到主窗口点击“重启”，让改动生效。");
+    }
+
+    /// <summary>
+    /// Runs <c>node apps/cli/lib/bin.js plugin --profile web &lt;args&gt;</c>. The
+    /// panel deliberately never writes the profile manifest itself; the CLI owns the
+    /// layer reconciliation.
+    /// </summary>
+    private async Task<int> RunDshPluginAsync(string[] arguments)
+    {
+        string node = NodeExecutable();
+        if (String.IsNullOrWhiteSpace(node))
+            throw new InvalidOperationException("未找到 Node.js，无法调用 dsh CLI。请先在主窗口执行一次启动或安装。");
+        string cli = DshCliPath();
+        if (!File.Exists(cli))
+            throw new InvalidOperationException("未找到已构建的 dsh CLI: " + cli + Environment.NewLine +
+                "请在主窗口点击“启动”（会使用兼容启动模式）或重新构建 Harness。");
+
+        var parts = new List<string>();
+        parts.Add(NodeNetworkPolicy.QuoteArgument(cli));
+        parts.Add("plugin");
+        parts.Add("--profile");
+        parts.Add(ProfileManifestPolicy.DefaultProfileName);
+        foreach (string argument in arguments)
+            parts.Add(NodeNetworkPolicy.QuoteArgument(argument));
+
+        var psi = new ProcessStartInfo(node, String.Join(" ", parts.ToArray()));
+        psi.WorkingDirectory = source;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.StandardErrorEncoding = Encoding.UTF8;
+        // dsh forwards to pnpm and needs it on PATH, exactly as the panel's own
+        // tool invocations do.
+        string pathKey = "PATH";
+        string pathValue = Environment.GetEnvironmentVariable("PATH") ?? "";
+        string prefix = !String.IsNullOrWhiteSpace(nodeDirectory) ? nodeDirectory : Path.GetDirectoryName(node);
+        if (!String.IsNullOrWhiteSpace(pnpmPath))
+            prefix = Path.GetDirectoryName(pnpmPath) + ";" + prefix;
+        else if (!String.IsNullOrWhiteSpace(corepackPath))
+            prefix = Path.GetDirectoryName(corepackPath) + ";" + prefix;
+        psi.EnvironmentVariables[pathKey] = prefix + ";" + pathValue;
+        psi.EnvironmentVariables["DSH_HOME"] = dshHome;
+
+        Log("> dsh plugin --profile " + ProfileManifestPolicy.DefaultProfileName + " " + String.Join(" ", arguments));
+        return await RunProcessStreamingAsync(psi);
+    }
+
+    /// <summary>Runs a process and echoes both streams into the marketplace log.</summary>
+    private async Task<int> RunProcessStreamingAsync(ProcessStartInfo psi)
+    {
+        var process = new Process { StartInfo = psi };
+        var standardOutput = new StringBuilder();
+        var standardError = new StringBuilder();
+        process.Start();
+        Task output = Task.Run(async delegate
+        {
+            string line;
+            while ((line = await process.StandardOutput.ReadLineAsync()) != null)
+            {
+                standardOutput.AppendLine(line);
+                Log(line);
+            }
+        });
+        Task error = Task.Run(async delegate
+        {
+            string line;
+            while ((line = await process.StandardError.ReadLineAsync()) != null)
+            {
+                standardError.AppendLine(line);
+                Log(line);
+            }
+        });
+        await Task.Run(delegate { process.WaitForExit(); });
+        await Task.WhenAll(output, error);
+        return process.ExitCode;
     }
 }
 
