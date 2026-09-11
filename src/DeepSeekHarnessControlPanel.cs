@@ -3005,51 +3005,90 @@ public sealed class ManagerForm : Form
             return;
         }
 
-        Exception tlsFailure = null;
+        bool retryAfterCreatingDirectory = false;
+        bool fallBackToNode = false;
         try
         {
-            using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-            {
-                if (!response.IsSuccessStatusCode)
-                    throw new InvalidOperationException("下载失败，服务器返回 " + (int)response.StatusCode + " " + response.ReasonPhrase + "。");
-                using (var input = await response.Content.ReadAsStreamAsync())
-                using (var output = File.Create(path))
-                {
-                    await input.CopyToAsync(output);
-                }
-            }
+            await FetchToFileViaDotNetAsync(url, path);
             return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // Defence in depth: a caller may stage into a directory that the lazy
+            // creation path deliberately did not make. Create it and retry once,
+            // rather than reporting a local path problem as a network failure.
+            if (String.IsNullOrEmpty(parent))
+                throw;
+            Directory.CreateDirectory(parent);
+            Log("下载目标目录不存在，已创建后重试: " + parent);
+            retryAfterCreatingDirectory = true;
         }
         catch (Exception ex)
         {
-            // This compiler targets C# 5: no exception filters, and no await inside
-            // a catch block. Record the decision and fall back after the handler.
+            // This compiler targets C# 5, which forbids both exception filters and
+            // await inside a catch block, so every catch here only decides and the
+            // work happens after the handlers.
             //
             // The transport test must run over the whole chain and run FIRST:
             // HttpClient wraps the SCHANNEL failure in an HttpRequestException whose
             // own message is only "发送请求时出错。", so a top-level check would miss
             // it and misreport a broken TLS stack as an unconnectable server.
             if (NodeNetworkPolicy.IsTlsStackFailure(ex))
-                tlsFailure = ex;
+            {
+                RequireNodeTransport(ex);
+                fallBackToNode = true;
+            }
             else if (ex is HttpRequestException)
+            {
                 throw new InvalidOperationException("无法建立 HTTPS 连接，请检查网络代理、证书或防火墙设置。" + Environment.NewLine + FlattenException(ex));
+            }
             else
+            {
                 throw;
+            }
         }
 
-        RequireNodeTransport(tlsFailure);
-        await FetchToFileViaNodeAsync(url, path, NodeNetworkPolicy.DefaultTimeoutSeconds);
+        if (fallBackToNode)
+        {
+            await FetchToFileViaNodeAsync(url, path, NodeNetworkPolicy.DefaultTimeoutSeconds);
+            return;
+        }
+        if (retryAfterCreatingDirectory)
+        {
+            await FetchToFileViaDotNetAsync(url, path);
+            return;
+        }
+    }
+
+    /// <summary>One .NET download attempt. Exceptions propagate to the caller.</summary>
+    private async Task FetchToFileViaDotNetAsync(string url, string path)
+    {
+        using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+        {
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException("下载失败，服务器返回 " + (int)response.StatusCode + " " + response.ReasonPhrase + "。");
+            using (var input = await response.Content.ReadAsStreamAsync())
+            using (var output = File.Create(path))
+            {
+                await input.CopyToAsync(output);
+            }
+        }
     }
 
     /// <summary>
     /// Fetches a small text resource through the same transport rules as
     /// <see cref="DownloadFileAsync"/>, for API responses that are parsed in memory.
+    ///
+    /// The scratch file lives directly in %TEMP% rather than in the Node scratch
+    /// directory: the .NET transport writes it itself, so routing it through a
+    /// directory that is only created for the Node transport would fail with a
+    /// missing-path error on every request.
     /// </summary>
     private async Task<string> FetchTextAsync(string url)
     {
         string temporary = Path.Combine(
-            NetworkScratchDirectory(),
-            "response-" + Guid.NewGuid().ToString("N") + ".txt");
+            Path.GetTempPath(),
+            "dsh-fetch-" + Guid.NewGuid().ToString("N") + ".txt");
         try
         {
             await DownloadFileAsync(url, temporary, false);
