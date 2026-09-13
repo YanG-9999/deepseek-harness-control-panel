@@ -2277,108 +2277,6 @@ public static class PanelVersionPolicy
     }
 }
 
-public enum TrayCloseAction
-{
-    /// <summary>Keep running in the tray; the service should stay available.</summary>
-    MinimizeToTray,
-    /// <summary>Actually exit the panel.</summary>
-    Exit
-}
-
-/// <summary>
-/// What closing the window means once the panel owns a tray icon.
-///
-/// The default is to keep running: a management panel that exits on close makes the
-/// tray icon pointless, and the service it supervises stays up either way. Exiting
-/// remains available from the tray menu and from the close prompt.
-/// </summary>
-public static class TrayClosePolicy
-{
-    /// <summary>
-    /// Whether the close prompt should be shown. Asking every single time is noise, so
-    /// the user's answer is remembered and the prompt is skipped afterwards.
-    /// </summary>
-    public static bool ShouldAskOnClose(bool alreadyAnswered)
-    {
-        return !alreadyAnswered;
-    }
-
-    /// <summary>
-    /// The close prompt's title and the two answers, which are also its button labels.
-    ///
-    /// A MessageBox cannot label its buttons, and that was this prompt's defect: the text
-    /// offered "最小化到托盘" and "退出" while the buttons read 是 and 否, so the two
-    /// choices on screen were not the two the sentence named, and 是 meant the drastic
-    /// one. The answers are exported so the dialog and the wording cannot drift apart.
-    /// </summary>
-    public const string ClosePromptTitle = "关闭控制面板";
-    public const string ClosePromptTrayAnswer = "最小化到托盘";
-    public const string ClosePromptExitAnswer = "退出面板";
-
-    public static string BuildClosePrompt(int port)
-    {
-        return "关闭窗口不会停止 Harness 服务，它仍在 " + port + " 端口监听。" + Environment.NewLine + Environment.NewLine +
-            "面板本身要怎么处理？此选择会被记住，以后关闭不再询问。" + Environment.NewLine +
-            "· " + ClosePromptTrayAnswer + "：面板继续运行，可从托盘图标打开。" + Environment.NewLine +
-            "· " + ClosePromptExitAnswer + "：完全关闭面板，Harness 不受影响。";
-    }
-
-    /// <summary>The remembered answer, as it is stored in the settings file.</summary>
-    public const string TraySettingValue = "tray";
-    public const string ExitSettingValue = "exit";
-
-    public static string ToSettingValue(TrayCloseAction action)
-    {
-        return action == TrayCloseAction.Exit ? ExitSettingValue : TraySettingValue;
-    }
-
-    /// <summary>
-    /// Reads the remembered answer. A missing, older, or hand-edited value means the
-    /// question has not been answered yet, which is the safe reading: the panel asks
-    /// rather than guessing on the user's behalf.
-    /// </summary>
-    public static bool TryParseSettingValue(string stored, out TrayCloseAction action)
-    {
-        action = TrayCloseAction.MinimizeToTray;
-        if (String.IsNullOrEmpty(stored))
-            return false;
-        string candidate = stored.Trim();
-        if (String.Equals(candidate, ExitSettingValue, StringComparison.OrdinalIgnoreCase))
-        {
-            action = TrayCloseAction.Exit;
-            return true;
-        }
-        if (String.Equals(candidate, TraySettingValue, StringComparison.OrdinalIgnoreCase))
-        {
-            action = TrayCloseAction.MinimizeToTray;
-            return true;
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// The tray menu labels. Kept together so the menu and its tests agree.
-    /// </summary>
-    public const string MenuShow = "打开控制面板";
-    public const string MenuOpenPage = "打开 Harness 页面";
-    public const string MenuStart = "启动 Harness";
-    public const string MenuStop = "停止 Harness";
-    public const string MenuExit = "退出";
-
-    /// <summary>
-    /// The hover tooltip. Carries the live state so the tray is informative without
-    /// opening the window.
-    /// </summary>
-    public static string BuildTooltip(bool running, int port, string version)
-    {
-        string state = running ? "正在运行" : "未运行";
-        string suffix = String.IsNullOrWhiteSpace(version) ? "" : "  " + version;
-        string text = "DeepSeek Harness 控制面板 — " + state + "（端口 " + port + "）" + suffix;
-        // NotifyIcon truncates beyond 63 characters, so keep it inside that budget.
-        return text.Length <= 63 ? text : text.Substring(0, 60) + "...";
-    }
-}
-
 /// <summary>
 /// How the installed Harness version is shown. The panel displays a bare version number
 /// with a leading v, while the value it reads from package.json has no prefix.
@@ -3010,23 +2908,6 @@ public sealed class ManagerForm : Form
     /// </summary>
     private readonly System.Windows.Forms.Timer stateTimer = new System.Windows.Forms.Timer();
 
-    /// <summary>
-    /// Keeps the panel reachable while its window is closed. Created in the constructor
-    /// because the close behaviour depends on it existing.
-    /// </summary>
-    private readonly NotifyIcon trayIcon = new NotifyIcon();
-
-    /// <summary>Whether the user asked to exit, as opposed to closing the window.</summary>
-    private bool exitRequested;
-
-    /// <summary>
-    /// What closing the window does, and whether the user has already said so. The answer
-    /// is read from the settings file at startup and written back on the first close, so
-    /// the question is asked once in the panel's life instead of once per launch.
-    /// </summary>
-    private TrayCloseAction closeAction = TrayCloseAction.MinimizeToTray;
-    private bool closeAnswerKnown;
-
     private Process server;
     private List<string> discoveredRoots = new List<string>();
     private string selectedNodeDirectory = "";
@@ -3069,10 +2950,6 @@ public sealed class ManagerForm : Form
         SetButtons(false, new HarnessStatusSnapshot(false, false, false, false, false, ""));
         QueueStateRefresh(true);
 
-        // Whether closing the window minimises to the tray or exits is remembered from the
-        // first time the user was asked; see OnFormClosing.
-        closeAnswerKnown = TrayClosePolicy.TryParseSettingValue(LoadSetting("closeBehavior"), out closeAction);
-
         // Check for an upstream release once the window is up. Runs after the first
         // paint and never blocks or alerts: a failed check is a normal condition.
         Shown += OnShown;
@@ -3084,7 +2961,7 @@ public sealed class ManagerForm : Form
         stateTimer.Start();
         FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
 
-        BuildTrayIcon();
+        FormClosing += OnFormClosing;
 
         // Start invisible; RevealWhenIdle puts it on screen once every control has painted.
         Opacity = 0;
@@ -3093,260 +2970,31 @@ public sealed class ManagerForm : Form
     }
 
     /// <summary>
-    /// Creates the tray icon and its menu. Built once; the menu items read live state
-    /// when opened rather than being rebuilt on every poll.
-    /// </summary>
-    private void BuildTrayIcon()
-    {
-        try
-        {
-            trayIcon.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        }
-        catch (Exception)
-        {
-            // A missing icon must not stop the panel from having a tray presence.
-        }
-        trayIcon.Text = TrayClosePolicy.BuildTooltip(false, Port, "");
-        trayIcon.Visible = true;
-        trayIcon.DoubleClick += delegate { ShowFromTray(); };
-
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(TrayClosePolicy.MenuShow, null, delegate { ShowFromTray(); });
-        menu.Items.Add(TrayClosePolicy.MenuOpenPage, null, delegate { OpenClick(null, EventArgs.Empty); });
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(TrayClosePolicy.MenuStart, null, delegate { StartClick(null, EventArgs.Empty); });
-        menu.Items.Add(TrayClosePolicy.MenuStop, null, delegate { StopClick(null, EventArgs.Empty); });
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(TrayClosePolicy.MenuExit, null, delegate { ExitFromTray(); });
-        trayIcon.ContextMenuStrip = menu;
-
-        FormClosing += OnFormClosing;
-    }
-
-    /// <summary>
-    /// Closing the window keeps the panel running in the tray unless the user chose to
-    /// exit. The prompt explains that, and its answer is remembered after the first time.
+    /// Closing the window closes the panel. Harness itself is untouched: it is a separate
+    /// process that the panel starts and stops, and it keeps running either way.
+    ///
+    /// The one case that asks first is an operation in flight. Exiting in the middle of an
+    /// install or an update would orphan the child process that the cancellation logic
+    /// exists to stop.
     /// </summary>
     private void OnFormClosing(object sender, FormClosingEventArgs e)
     {
-        if (exitRequested || e.CloseReason == CloseReason.WindowsShutDown)
+        if (e.CloseReason == CloseReason.WindowsShutDown || !busy)
             return;
 
-        if (TrayClosePolicy.ShouldAskOnClose(closeAnswerKnown))
+        DialogResult answer = MessageBox.Show(
+            this,
+            "当前有操作正在进行。退出会中断它，并可能留下未完成的安装。" + Environment.NewLine + Environment.NewLine +
+            "建议先点击“取消”等待操作停止。仍要退出吗？",
+            "DeepSeek Harness",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (answer != DialogResult.Yes)
         {
-            bool answered;
-            closeAction = AskCloseAction(out answered);
-            if (!answered)
-            {
-                // The user backed out of the question, so nothing is decided and the
-                // window stays where it is.
-                e.Cancel = true;
-                return;
-            }
-            closeAnswerKnown = true;
-            RememberCloseAction(closeAction);
+            e.Cancel = true;
+            return;
         }
-
-        e.Cancel = true;
-        if (closeAction == TrayCloseAction.Exit)
-            ExitFromTray();
-        else
-            HideToTray();
-    }
-
-    /// <summary>
-    /// Asks how closing the window should behave, with the two answers as buttons.
-    /// Closing the dialog itself reports answered = false: the question stays unanswered
-    /// and the panel stays open, which is the only reading that changes nothing.
-    /// </summary>
-    private TrayCloseAction AskCloseAction(out bool answered)
-    {
-        // The dialog's measurements, kept together because the client size is derived from
-        // them: 14 px of page around a card, 26 px of card inside its edges, and the two
-        // 44 px answer buttons.
-        const int DialogPadding = 14;
-        const int CardPaddingX = 26;
-        const int CardPaddingTop = 24;
-        const int CardPaddingBottom = 22;
-        const int MessageWidth = 540;
-        const int ButtonHeight = 44;
-        const int ButtonWidth = 158;
-
-        TrayCloseAction choice = TrayCloseAction.MinimizeToTray;
-        // An out parameter cannot be touched from the click handlers, so the answer is
-        // collected here and handed back after the dialog closes.
-        bool confirmed = false;
-
-        using (var dialog = new Form())
-        {
-            dialog.Text = TrayClosePolicy.ClosePromptTitle;
-            dialog.Icon = Icon;
-            dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
-            dialog.StartPosition = FormStartPosition.CenterParent;
-            dialog.MinimizeBox = false;
-            dialog.MaximizeBox = false;
-            dialog.ShowInTaskbar = false;
-            dialog.Font = UiStyle.BodyFont();
-            // The page colour, so the strip around the card is right from the first frame
-            // rather than flashing the default control grey.
-            dialog.BackColor = UiStyle.WindowBackground;
-
-            // The same page-under-card arrangement the panel itself uses: the gradient is
-            // the page, the white rounded card holds everything. A stock dialog with its
-            // own spacing and button sizes reads as a different program.
-            dialog.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                UiBackground.Paint(e.Graphics, dialog.ClientRectangle);
-            };
-
-            var card = new UiCardPanel();
-            card.Dock = DockStyle.Fill;
-            card.Margin = new Padding(0);
-            dialog.Padding = new Padding(DialogPadding);
-            dialog.Controls.Add(card);
-
-            // Laid out rather than placed at fixed coordinates: the dialog's client size
-            // is not what the constructor asked for once Windows has had its say about
-            // scaling, and fixed positions clipped the last line of the message.
-            var layout = new TableLayoutPanel();
-            layout.Dock = DockStyle.Fill;
-            layout.Margin = new Padding(0);
-            layout.ColumnCount = 1;
-            layout.RowCount = 2;
-            layout.BackColor = Color.Transparent;
-            layout.Padding = new Padding(CardPaddingX, CardPaddingTop, CardPaddingX, CardPaddingBottom);
-            // Without an explicit column style the single column sizes itself and the
-            // message gets a narrower box than it was measured against.
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ButtonHeight));
-            card.Controls.Add(layout);
-
-            var message = new Label();
-            message.Text = TrayClosePolicy.BuildClosePrompt(Port);
-            message.Font = UiStyle.BodyFont();
-            message.ForeColor = UiStyle.TextPrimary;
-            message.BackColor = Color.Transparent;
-            // Measured before the dialog is sized: the text wraps to a different number of
-            // lines than the source suggests, and a dialog sized by eye either clips the
-            // last line or leaves a gap where nothing is.
-            message.AutoSize = true;
-            // Measured a little narrower than the label ends up, so the wrap that is
-            // measured is at least as tall as the wrap that is drawn; measuring at the
-            // exact width came out one line short and clipped the last bullet.
-            message.MaximumSize = new Size(MessageWidth - 16, 0);
-            int messageHeight = message.PreferredSize.Height + 8;
-            message.AutoSize = false;
-            message.Dock = DockStyle.Fill;
-            message.Margin = new Padding(0);
-            message.TextAlign = ContentAlignment.TopLeft;
-            layout.Controls.Add(message, 0, 0);
-
-            dialog.ClientSize = new Size(
-                MessageWidth + (CardPaddingX * 2) + (DialogPadding * 2),
-                messageHeight + CardPaddingTop + CardPaddingBottom + ButtonHeight + (DialogPadding * 2));
-
-            var buttons = new TableLayoutPanel();
-            buttons.Dock = DockStyle.Fill;
-            buttons.Margin = new Padding(0);
-            buttons.ColumnCount = 3;
-            buttons.RowCount = 1;
-            buttons.BackColor = Color.Transparent;
-            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ButtonWidth));
-            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ButtonWidth));
-            buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.Controls.Add(buttons, 0, 1);
-
-            var keepRunning = new UiFlatButton();
-            keepRunning.Text = TrayClosePolicy.ClosePromptTrayAnswer;
-            keepRunning.IsPrimary = true;
-            keepRunning.Dock = DockStyle.Fill;
-            keepRunning.Margin = new Padding(0, 0, 6, 0);
-            keepRunning.Click += delegate
-            {
-                choice = TrayCloseAction.MinimizeToTray;
-                confirmed = true;
-                dialog.Close();
-            };
-            buttons.Controls.Add(keepRunning, 1, 0);
-
-            var quit = new UiFlatButton();
-            quit.Text = TrayClosePolicy.ClosePromptExitAnswer;
-            quit.Dock = DockStyle.Fill;
-            quit.Margin = new Padding(6, 0, 0, 0);
-            quit.Click += delegate
-            {
-                choice = TrayCloseAction.Exit;
-                confirmed = true;
-                dialog.Close();
-            };
-            buttons.Controls.Add(quit, 2, 0);
-
-            dialog.AcceptButton = keepRunning;
-            dialog.ShowDialog(this);
-        }
-        answered = confirmed;
-        return choice;
-    }
-
-    /// <summary>
-    /// Stores the answer, so the question is asked once in the panel's life rather than
-    /// once per launch. Failing to save only costs a repeated question, so it is logged
-    /// and not treated as fatal.
-    /// </summary>
-    private void RememberCloseAction(TrayCloseAction action)
-    {
-        try
-        {
-            SaveSetting("closeBehavior", TrayClosePolicy.ToSettingValue(action));
-        }
-        catch (Exception ex)
-        {
-            Log("保存关闭方式失败: " + ex.Message);
-        }
-    }
-
-    /// <summary>Hides the window and says so, so the panel is not simply "missing".</summary>
-    private void HideToTray()
-    {
-        Hide();
-        ShowInTaskbar = false;
-        Log("已最小化到托盘。双击托盘图标可重新打开。");
-    }
-
-    private void ShowFromTray()
-    {
-        Show();
-        Reveal();
-        ShowInTaskbar = true;
-        WindowState = FormWindowState.Normal;
-        Activate();
-    }
-
-    /// <summary>
-    /// Real exit. Warns when an operation is in flight, because exiting mid-build would
-    /// orphan the child process the cancellation logic exists to stop.
-    /// </summary>
-    private void ExitFromTray()
-    {
-        if (busy)
-        {
-            DialogResult answer = MessageBox.Show(
-                this,
-                "当前有操作正在进行。退出会中断它，并可能留下未完成的安装。" + Environment.NewLine + Environment.NewLine +
-                "建议先点击“取消”等待操作停止。仍要退出吗？",
-                "DeepSeek Harness",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-            if (answer != DialogResult.Yes)
-                return;
-            CancelOperation();
-        }
-
-        exitRequested = true;
-        trayIcon.Visible = false;
-        Close();
+        CancelOperation();
     }
 
 
@@ -3458,8 +3106,7 @@ public sealed class ManagerForm : Form
     }
 
     /// <summary>
-    /// Ends the invisible start. Opening from the tray also calls this: a panel that was
-    /// never revealed must not stay transparent when the user asks to see it.
+    /// Ends the invisible start, from whichever caller gets there first.
     /// </summary>
     private void Reveal()
     {
@@ -4595,15 +4242,6 @@ public sealed class ManagerForm : Form
         // chip for a healthy state and a warning colour for a foreign port.
         TintState(statusLabel, snapshot.StatusText);
         TintState(runningLabel, snapshot.RunningText);
-
-        try
-        {
-            trayIcon.Text = TrayClosePolicy.BuildTooltip(snapshot.Running, Port, snapshot.Version);
-        }
-        catch (Exception)
-        {
-            // A tooltip longer than the platform limit throws; the panel must survive it.
-        }
     }
 
     /// <summary>
@@ -6267,7 +5905,7 @@ public sealed class ManagerForm : Form
             string text = File.ReadAllText(SettingsFile);
             // Only the keys named here are carried over, so a new setting has to be added
             // to this list or the first write of any other key silently drops it.
-            foreach (string preserved in new[] { "installRoot", "closeBehavior" })
+            foreach (string preserved in new[] { "installRoot" })
             {
                 string current = ReadJsonValue(text, preserved);
                 if (!String.IsNullOrEmpty(current))

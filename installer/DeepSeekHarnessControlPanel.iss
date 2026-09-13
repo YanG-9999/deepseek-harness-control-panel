@@ -64,8 +64,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 ; 默认不勾选：未经同意就自启容易招人反感，也容易被安全软件针对。
-; 面板内也有同样的开关，两者写入同一处注册表项。
-Name: "autostart"; Description: "开机时自动启动控制面板（可稍后在面板内更改）"; GroupDescription: "附加选项:"; Flags: unchecked
+Name: "autostart"; Description: "开机时自动启动控制面板"; GroupDescription: "附加选项:"; Flags: unchecked
 ; 桌面快捷方式同样默认不勾选。这条任务必须存在：[Icons] 里的桌面项引用了它，
 ; 缺了它整个脚本无法编译（"unknown task"）。
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项:"; Flags: unchecked
@@ -80,9 +79,9 @@ Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Registry]
-; 只写当前用户的启动项，与面板内的"开机自动启动"复选框是同一处。
+; 只写当前用户的启动项，不碰 HKLM，因此整个安装流程不需要管理员权限。
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
-    ValueName: "DeepSeekHarnessControlPanel"; ValueData: """{app}\{#AppExeName}"" --tray"; \
+    ValueName: "DeepSeekHarnessControlPanel"; ValueData: """{app}\{#AppExeName}"""; \
     Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]

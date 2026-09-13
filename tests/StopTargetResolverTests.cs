@@ -65,7 +65,6 @@ public static class StopTargetResolverTests
         OperationCancellationPolicyTests.Run();
         LogExportPolicyTests.Run();
         HarnessPortPolicyTests.Run();
-        AutoStartAndTrayPolicyTests.Run();
         PanelVersionPolicyTests.Run();
 
         AssertResolution(
