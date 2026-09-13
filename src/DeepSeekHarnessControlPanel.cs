@@ -58,15 +58,41 @@ public static class StopTargetResolver
     }
 }
 
+/// <summary>
+/// What a removal target holds. The kind drives the default selection, because a
+/// program directory can be reinstalled but a user-data directory cannot be rebuilt.
+/// </summary>
+public enum UninstallTargetKind
+{
+    /// <summary>The Harness program tree and its private Node/pnpm runtime.</summary>
+    ProgramFiles,
+    /// <summary>Settings, API keys, sessions, and attachments under the Harness home.</summary>
+    UserData,
+    /// <summary>This control panel's own settings.</summary>
+    PanelSettings
+}
+
 public sealed class UninstallTarget
 {
     public string Path { get; private set; }
     public string Description { get; private set; }
+    public UninstallTargetKind Kind { get; private set; }
 
-    public UninstallTarget(string path, string description)
+    public UninstallTarget(string path, string description, UninstallTargetKind kind)
     {
         Path = path;
         Description = description;
+        Kind = kind;
+    }
+
+    /// <summary>
+    /// Whether this target starts selected. User data does not: it holds credentials
+    /// and conversation history that cannot be recovered, so removing it must be a
+    /// deliberate choice rather than a default that is scrolled past.
+    /// </summary>
+    public bool SelectedByDefault
+    {
+        get { return Kind != UninstallTargetKind.UserData; }
     }
 }
 
@@ -78,19 +104,148 @@ public static class UninstallTargetPlanner
         string settingsDirectory)
     {
         var targets = new List<UninstallTarget>();
-        AddTarget(targets, installRoot, "Harness 安装目录（其中的专用 Node/pnpm 如存在会一并删除）");
-        AddTarget(targets, harnessHome, "Harness 用户数据（配置、API Key、会话和附件）");
-        AddTarget(targets, settingsDirectory, "控制面板配置");
+        AddTarget(targets, installRoot, "Harness 安装目录（其中的专用 Node/pnpm 如存在会一并删除）", UninstallTargetKind.ProgramFiles);
+        AddTarget(targets, harnessHome, "Harness 用户数据（配置、API Key、会话和附件）", UninstallTargetKind.UserData);
+        AddTarget(targets, settingsDirectory, "控制面板配置", UninstallTargetKind.PanelSettings);
         return targets;
     }
 
-    private static void AddTarget(List<UninstallTarget> targets, string path, string description)
+    private static void AddTarget(
+        List<UninstallTarget> targets,
+        string path,
+        string description,
+        UninstallTargetKind kind)
     {
         if (String.IsNullOrWhiteSpace(path))
             return;
         string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
         if (!targets.Any(target => String.Equals(target.Path, full, StringComparison.OrdinalIgnoreCase)))
-            targets.Add(new UninstallTarget(full, description));
+            targets.Add(new UninstallTarget(full, description, kind));
+    }
+}
+
+/// <summary>
+/// Measures how much a removal target holds, and renders the choice the user made.
+/// Separated from the dialog so the wording and the size rules are testable.
+/// </summary>
+public static class UninstallSelectionPolicy
+{
+    /// <summary>Reported when the path does not exist at all.</summary>
+    public const long Missing = -1;
+
+    /// <summary>
+    /// Reported when the path exists but could not be measured. "Unknown" and "empty"
+    /// are different answers, and showing 0 B for an unreadable directory would lie.
+    /// </summary>
+    public const long Unmeasurable = -2;
+
+    public static long MeasureSizeBytes(string path)
+    {
+        if (String.IsNullOrWhiteSpace(path))
+            return Missing;
+        try
+        {
+            if (File.Exists(path))
+                return new FileInfo(path).Length;
+            if (!Directory.Exists(path))
+                return Missing;
+
+            long total = 0;
+            foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    total += new FileInfo(file).Length;
+                }
+                catch (Exception)
+                {
+                    // A file that vanished or is locked is simply not counted; a size
+                    // that is slightly low beats failing the whole dialog.
+                }
+            }
+            return total;
+        }
+        catch (Exception)
+        {
+            return Unmeasurable;
+        }
+    }
+
+    /// <summary>A human-readable size for the dialog.</summary>
+    public static string DescribeSize(long bytes)
+    {
+        if (bytes == Missing)
+            return "不存在";
+        if (bytes == Unmeasurable)
+            return "无法测量";
+        if (bytes < 1024)
+            return bytes + " B";
+        double kilobytes = bytes / 1024.0;
+        if (kilobytes < 1024)
+            return kilobytes.ToString("0.0") + " KB";
+        double megabytes = kilobytes / 1024.0;
+        if (megabytes < 1024)
+            return megabytes.ToString("0.0") + " MB";
+        return (megabytes / 1024.0).ToString("0.00") + " GB";
+    }
+
+    /// <summary>
+    /// The confirmation text. It names every target with its size and marks whether the
+    /// user chose it, so the summary and the checkboxes cannot disagree.
+    /// </summary>
+    public static string DescribeSelection(IEnumerable<UninstallTarget> targets, Func<UninstallTarget, bool> isSelected)
+    {
+        var lines = new List<string>();
+        bool anySelected = false;
+        bool anyKept = false;
+
+        if (targets != null)
+        {
+            foreach (UninstallTarget target in targets)
+            {
+                bool selected = isSelected != null && isSelected(target);
+                string size = DescribeSize(MeasureSizeBytes(target.Path));
+                lines.Add((selected ? "[删除] " : "[保留] ") + target.Description);
+                lines.Add("        " + target.Path + "   (" + size + ")");
+                if (selected)
+                    anySelected = true;
+                else
+                    anyKept = true;
+            }
+        }
+
+        if (!anySelected)
+            lines.Add("没有勾选任何要删除的项目。");
+        else if (anyKept)
+            lines.Add("未勾选的项目会完整保留。");
+
+        return String.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    /// <summary>
+    /// The trailing warning. It calls out the irreversible case explicitly, because
+    /// removing user data cannot be undone by reinstalling.
+    /// </summary>
+    public static string BuildWarning(IEnumerable<UninstallTarget> targets, Func<UninstallTarget, bool> isSelected)
+    {
+        bool removesUserData = false;
+        if (targets != null && isSelected != null)
+        {
+            foreach (UninstallTarget target in targets)
+            {
+                if (target.Kind == UninstallTargetKind.UserData && isSelected(target))
+                    removesUserData = true;
+            }
+        }
+
+        string warning = "删除后无法恢复。";
+        if (removesUserData)
+        {
+            warning += Environment.NewLine +
+                "你勾选了用户数据：其中的 API Key、会话记录和附件将被永久删除，" +
+                "重新安装 Harness 也无法找回。";
+        }
+        return warning;
     }
 }
 
@@ -1923,26 +2078,42 @@ public sealed class ManagerForm : Form
     {
         if (!IsInstalled())
             return;
-        string summary = BuildUninstallSummary();
-        string warning = "此操作不可恢复，将彻底删除 DeepSeek Harness。" +
+
+        List<UninstallTarget> targets = GetUninstallTargets();
+        List<UninstallTarget> selected;
+        using (var dialog = new UninstallSelectionForm(targets))
+        {
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+            selected = dialog.SelectedTargets;
+        }
+
+        string summary = UninstallSelectionPolicy.DescribeSelection(
+            targets,
+            delegate(UninstallTarget target) { return selected.Contains(target); });
+        string warning = "将删除以下内容：" +
             Environment.NewLine + Environment.NewLine +
             summary +
             Environment.NewLine + Environment.NewLine +
+            UninstallSelectionPolicy.BuildWarning(
+                targets,
+                delegate(UninstallTarget target) { return selected.Contains(target); }) +
+            Environment.NewLine +
             "系统全局 Node、npm、pnpm 和其他项目不会被删除。" +
             Environment.NewLine + Environment.NewLine +
             "确定继续吗？";
         if (Ask(warning, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             return;
-        RunAsync("正在彻底卸载 DeepSeek Harness", UninstallAsync);
+
+        pendingUninstallTargets = selected;
+        RunAsync("正在卸载所选内容", UninstallAsync);
     }
 
-    private string BuildUninstallSummary()
-    {
-        var lines = new List<string>();
-        foreach (UninstallTarget target in GetUninstallTargets())
-            lines.Add("将删除：" + target.Description + Environment.NewLine + "  " + target.Path);
-        return String.Join(Environment.NewLine, lines.ToArray());
-    }
+    /// <summary>
+    /// The targets the user confirmed. Set by the selection dialog and consumed by the
+    /// uninstall run, so the deletion can never touch something that was not shown.
+    /// </summary>
+    private List<UninstallTarget> pendingUninstallTargets;
 
     private List<UninstallTarget> GetUninstallTargets()
     {
@@ -2336,8 +2507,19 @@ public sealed class ManagerForm : Form
     private async Task UninstallAsync()
     {
         await StopAsync();
+
+        // Delete exactly what the user confirmed, never a freshly recomputed list: the
+        // targets were shown with their sizes and the user agreed to those.
+        List<UninstallTarget> targets = pendingUninstallTargets ?? new List<UninstallTarget>();
+        pendingUninstallTargets = null;
+        if (targets.Count == 0)
+        {
+            Log("没有选中任何要删除的项目。");
+            return;
+        }
+
         var failures = new List<string>();
-        foreach (UninstallTarget target in GetUninstallTargets())
+        foreach (UninstallTarget target in targets)
         {
             if (!IsSafeUninstallTarget(target.Path))
             {
@@ -2369,8 +2551,18 @@ public sealed class ManagerForm : Form
                 "卸载未完全完成，以下目标删除失败:" + Environment.NewLine +
                 String.Join(Environment.NewLine, failures.ToArray()));
 
-        pathBox.Text = "";
-        Log("已彻底删除 Harness、用户数据、控制面板配置及 Harness 专用 Node/pnpm。");
+        // Only clear the configured root when the program tree itself was removed;
+        // keeping user data means the install root may still hold it.
+        bool removedProgram = false;
+        foreach (UninstallTarget target in targets)
+        {
+            if (target.Kind == UninstallTargetKind.ProgramFiles)
+                removedProgram = true;
+        }
+        if (removedProgram)
+            pathBox.Text = "";
+
+        Log("已删除所选内容。未勾选的项目保留在原处。");
     }
 
     private bool IsSafeUninstallTarget(string target)
@@ -4017,6 +4209,190 @@ public sealed class ManagerForm : Form
 /// panel never edits the profile manifest itself, so the CLI stays the single
 /// owner of the bundle layer list.
 /// </summary>
+/// <summary>
+/// Asks which removal targets to delete. WinForms has no checked-list dialog, so this
+/// builds one: each target gets a checkbox, its path, and its measured size.
+///
+/// User data starts unchecked. That is a deliberate change from removing everything
+/// unconditionally, because one stray click in a single confirmation dialog used to
+/// destroy API keys and conversation history that no reinstall can restore.
+/// </summary>
+public sealed class UninstallSelectionForm : Form
+{
+    private readonly List<UninstallTarget> targets;
+    private readonly List<CheckBox> boxes = new List<CheckBox>();
+    private readonly Label warningLabel = new Label();
+
+    public UninstallSelectionForm(List<UninstallTarget> targets)
+    {
+        this.targets = targets ?? new List<UninstallTarget>();
+
+        Text = "选择要删除的内容";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        Width = 720;
+        Height = 420;
+        MinimumSize = new Size(640, 360);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Microsoft YaHei UI", 9F);
+        ShowInTaskbar = false;
+
+        BuildUi();
+    }
+
+    /// <summary>The targets the user chose. Empty when the dialog was cancelled.</summary>
+    public List<UninstallTarget> SelectedTargets { get; private set; }
+
+    private void BuildUi()
+    {
+        var main = new TableLayoutPanel();
+        main.Dock = DockStyle.Fill;
+        main.Padding = new Padding(14);
+        main.ColumnCount = 1;
+        main.RowCount = 3;
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        Controls.Add(main);
+
+        var heading = new Label();
+        heading.Dock = DockStyle.Fill;
+        heading.Text = "勾选要删除的项目。" + Environment.NewLine +
+            "未勾选的项目会被完整保留。";
+        main.Controls.Add(heading, 0, 0);
+
+        var list = new FlowLayoutPanel();
+        list.Dock = DockStyle.Fill;
+        list.FlowDirection = FlowDirection.TopDown;
+        list.WrapContents = false;
+        list.AutoScroll = true;
+        foreach (UninstallTarget target in targets)
+        {
+            long bytes = UninstallSelectionPolicy.MeasureSizeBytes(target.Path);
+            var box = new CheckBox();
+            box.AutoSize = true;
+            box.MaximumSize = new Size(650, 0);
+            box.Checked = target.SelectedByDefault;
+            box.Text = target.Description + "   (" + UninstallSelectionPolicy.DescribeSize(bytes) + ")" +
+                Environment.NewLine + "  " + target.Path;
+            box.Tag = target;
+            box.CheckedChanged += delegate { UpdateWarning(); };
+            boxes.Add(box);
+            list.Controls.Add(box);
+        }
+        main.Controls.Add(list, 0, 1);
+
+        var footer = new TableLayoutPanel();
+        footer.Dock = DockStyle.Fill;
+        footer.ColumnCount = 2;
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        warningLabel.Dock = DockStyle.Fill;
+        warningLabel.ForeColor = Color.Firebrick;
+        warningLabel.TextAlign = ContentAlignment.MiddleLeft;
+        footer.Controls.Add(warningLabel, 0, 0);
+
+        var buttons = new FlowLayoutPanel();
+        buttons.Dock = DockStyle.Fill;
+        buttons.FlowDirection = FlowDirection.RightToLeft;
+        var confirm = new Button { Text = "删除所选", AutoSize = true, Height = 30 };
+        confirm.Click += ConfirmClick;
+        var cancel = new Button { Text = "取消", AutoSize = true, Height = 30, DialogResult = DialogResult.Cancel };
+        buttons.Controls.Add(confirm);
+        buttons.Controls.Add(cancel);
+        footer.Controls.Add(buttons, 1, 0);
+        main.Controls.Add(footer, 0, 2);
+
+        AcceptButton = confirm;
+        CancelButton = cancel;
+        UpdateWarning();
+    }
+
+    private bool IsSelected(UninstallTarget target)
+    {
+        foreach (CheckBox box in boxes)
+        {
+            var tagged = box.Tag as UninstallTarget;
+            if (tagged == target)
+                return box.Checked;
+        }
+        return false;
+    }
+
+    private int SelectedCount()
+    {
+        int count = 0;
+        foreach (CheckBox box in boxes)
+        {
+            if (box.Checked)
+                count++;
+        }
+        return count;
+    }
+
+    private void UpdateWarning()
+    {
+        if (SelectedCount() == 0)
+        {
+            warningLabel.Text = "没有勾选任何项目。";
+            return;
+        }
+
+        bool removesUserData = false;
+        foreach (UninstallTarget target in targets)
+        {
+            if (target.Kind == UninstallTargetKind.UserData && IsSelected(target))
+                removesUserData = true;
+        }
+        warningLabel.Text = removesUserData
+            ? "将删除用户数据：API Key、会话和附件无法找回。"
+            : "删除后无法恢复。";
+    }
+
+    private void ConfirmClick(object sender, EventArgs e)
+    {
+        var selected = new List<UninstallTarget>();
+        foreach (CheckBox box in boxes)
+        {
+            var target = box.Tag as UninstallTarget;
+            if (target != null && box.Checked)
+                selected.Add(target);
+        }
+
+        if (selected.Count == 0)
+        {
+            MessageBox.Show(this, "请至少勾选一个要删除的项目，或点击“取消”。",
+                "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // A second explicit confirmation for the irreversible case, on top of the
+        // checkbox, because this is the only step that cannot be undone.
+        bool removesUserData = false;
+        foreach (UninstallTarget target in selected)
+        {
+            if (target.Kind == UninstallTargetKind.UserData)
+                removesUserData = true;
+        }
+        if (removesUserData)
+        {
+            DialogResult answer = MessageBox.Show(
+                this,
+                "你将删除 Harness 用户数据。" + Environment.NewLine + Environment.NewLine +
+                "其中的 API Key、会话记录和附件会被永久删除，重新安装 Harness 也无法找回。" + Environment.NewLine + Environment.NewLine +
+                "确定继续吗？",
+                "确认删除用户数据",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes)
+                return;
+        }
+
+        SelectedTargets = selected;
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+}
+
 public static class Program
 {
     /// <summary>Guards against a cascade of dialogs when faults repeat.</summary>
