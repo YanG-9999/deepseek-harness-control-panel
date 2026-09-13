@@ -850,6 +850,63 @@ public static class HarnessUpdatePolicy
 }
 
 /// <summary>
+/// Cancellation rules for long operations. A cancelled run must be reported as a
+/// cancellation rather than a failure, and the child process tree must actually be
+/// stopped instead of being left orphaned.
+/// </summary>
+public static class OperationCancellationPolicy
+{
+    /// <summary>
+    /// What the install button shows while an operation runs. The same button becomes
+    /// the escape hatch, so no separate control is needed.
+    /// </summary>
+    public const string CancelButtonText = "取消";
+
+    public const string CancelledLogLine = "操作已取消。";
+
+    /// <summary>
+    /// Whether an operation that finished should be reported as cancelled rather than
+    /// failed.
+    ///
+    /// Both inputs are needed. A cancellation request can be observed before the
+    /// action notices it, and a faulted action can still be a cancellation when the
+    /// failing step is the one that observed the token; reporting those as errors
+    /// would show a scary dialog for a deliberate user action.
+    /// </summary>
+    public static bool IsCancellation(bool cancellationRequested, bool taskCanceled)
+    {
+        return cancellationRequested || taskCanceled;
+    }
+
+    /// <summary>Whether the operation outcome should be shown as an error dialog.</summary>
+    public static bool ShouldReportAsFailure(bool cancellationRequested, bool taskFaulted)
+    {
+        return taskFaulted && !cancellationRequested;
+    }
+
+    /// <summary>
+    /// Whether a failed kill should be reported as an error. A process that already
+    /// exited between the check and the kill raises InvalidOperationException, which
+    /// is the ordinary race and not worth alarming the user about.
+    /// </summary>
+    public static bool IsExpectedKillRace(Exception error)
+    {
+        return error is InvalidOperationException;
+    }
+
+    /// <summary>
+    /// Quotes a pid for taskkill. The pid is numeric, so this exists to keep the
+    /// argument shape in one place and to reject anything that is not a pid.
+    /// </summary>
+    public static string BuildTaskkillArguments(int processId)
+    {
+        if (processId <= 0)
+            throw new ArgumentOutOfRangeException("processId");
+        return "/PID " + processId + " /T /F";
+    }
+}
+
+/// <summary>
 /// A point-in-time view of the panel's state. One snapshot is computed per refresh
 /// and shared by the labels, the buttons, and the change detector, so a refresh no
 /// longer recomputes the same port and process facts three separate times.
@@ -1182,6 +1239,27 @@ public sealed class ManagerForm : Form
     private HarnessStatusSnapshot lastSnapshot;
 
     /// <summary>
+    /// Cancels the operation currently running, if that operation opted in. Null
+    /// between operations.
+    /// </summary>
+    private CancellationTokenSource operationCancellation;
+
+    /// <summary>
+    /// The child process currently being waited on, so a cancellation can stop it
+    /// instead of leaving an orphaned pnpm or node build behind.
+    /// </summary>
+    private Process runningToolProcess;
+
+    /// <summary>The title of the operation in flight, used for the cancellation log line.</summary>
+    private string runningOperationTitle = "";
+
+    /// <summary>
+    /// The token the running operation should observe. <see cref="CancellationToken.None"/>
+    /// for operations that did not opt in, so callers never need a null check.
+    /// </summary>
+    private CancellationToken operationToken = CancellationToken.None;
+
+    /// <summary>
     /// Polls the running state so a stopped Harness is noticed on its own. Fully
     /// qualified because System.Threading is also imported and its Timer would
     /// marshal the tick onto a pool thread instead of the UI thread.
@@ -1423,20 +1501,36 @@ public sealed class ManagerForm : Form
         }
     }
 
+    /// <summary>
+    /// Whether a click on an action button should cancel the running operation instead
+    /// of starting a new one. The install and update buttons are the visible cancel
+    /// affordance, so their normal handler stands down while a cancellable operation
+    /// is in flight.
+    /// </summary>
+    private bool TryCancelFromButtonClick()
+    {
+        if (operationCancellation == null)
+            return false;
+        CancelOperation();
+        return true;
+    }
+
     private void InstallClick(object sender, EventArgs e)
     {
+        if (TryCancelFromButtonClick())
+            return;
         if (IsInstalled() && !IsInstallationReady())
         {
             string prompt = "检测到当前 Harness 安装不完整，无法启动。" + Environment.NewLine +
                 "将重新下载官方源码并修复安装，保留 Harness 专用运行环境、日志和你的用户配置。" + Environment.NewLine +
                 "确定开始修复吗？";
             if (Ask(prompt, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                RunAsync("正在修复 DeepSeek Harness", RepairAsync);
+                RunAsync("正在修复 DeepSeek Harness", RepairAsync, true);
             return;
         }
         if (!ChooseInstallRoot())
             return;
-        RunAsync("正在安装 DeepSeek Harness", InstallAsync);
+        RunAsync("正在安装 DeepSeek Harness", InstallAsync, true);
     }
 
     private void StartClick(object sender, EventArgs e)
@@ -1460,7 +1554,10 @@ public sealed class ManagerForm : Form
 
     private void UpdateClick(object sender, EventArgs e)
     {
-        RunAsync("正在检查 DeepSeek Harness 更新", CheckUpdateAsync);
+        if (TryCancelFromButtonClick())
+            return;
+        // The download and rebuild inside this flow can run for minutes.
+        RunAsync("正在检查 DeepSeek Harness 更新", CheckUpdateAsync, true);
     }
 
     private void OpenClick(object sender, EventArgs e)
@@ -1471,7 +1568,24 @@ public sealed class ManagerForm : Form
             Log("当前运行实例没有可用的认证地址，请点击“重启”生成新的访问地址。");
             return;
         }
-        Process.Start(readyUrl);
+        try
+        {
+            Process.Start(readyUrl);
+        }
+        catch (Exception ex)
+        {
+            // No registered browser handler, or a blocked shell association. The
+            // address is still usable, so hand it over instead of failing silently.
+            Log("无法自动打开浏览器：" + ex.Message);
+            Log("请在浏览器中手动打开：" + readyUrl);
+            MessageBox.Show(
+                this,
+                "无法自动打开浏览器。" + Environment.NewLine + Environment.NewLine +
+                "请在浏览器中手动打开这个地址：" + Environment.NewLine + readyUrl,
+                "DeepSeek Harness",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
     }
 
     private void RescanClick(object sender, EventArgs e)
@@ -1572,7 +1686,15 @@ public sealed class ManagerForm : Form
         }
     }
 
-    private void RunAsync(string title, Func<Task> action)
+    /// <summary>
+    /// Runs a long operation with the UI locked.
+    ///
+    /// <paramref name="cancellable"/> decides whether the same button doubles as a
+    /// cancel action. The install, update, and repair flows are cancellable because
+    /// their child builds can run for minutes; a start or stop is not, because
+    /// interrupting it halfway leaves the service in an unknown state.
+    /// </summary>
+    private void RunAsync(string title, Func<Task> action, bool cancellable = false)
     {
         lock (gate)
         {
@@ -1583,16 +1705,41 @@ public sealed class ManagerForm : Form
             }
             busy = true;
         }
+
+        CancellationTokenSource cancellation = null;
+        if (cancellable)
+        {
+            cancellation = new CancellationTokenSource();
+            operationCancellation = cancellation;
+            operationToken = cancellation.Token;
+        }
+        else
+        {
+            operationToken = CancellationToken.None;
+        }
+        runningOperationTitle = title;
+        runningToolProcess = null;
+
         SetButtons(false, lastSnapshot ?? ComputeStatusSnapshot());
         Log(title + "...");
         Task.Run(action).ContinueWith(t =>
         {
             BeginInvoke((Action)delegate
             {
+                bool wasCancelled = OperationCancellationPolicy.IsCancellation(
+                    cancellation != null && cancellation.IsCancellationRequested,
+                    t.IsCanceled);
+
                 busy = false;
-                // RefreshState recomputes the snapshot and reapplies the buttons, so
-                // it covers both the enabled and the state side of finishing.
-                if (t.IsFaulted)
+                runningToolProcess = null;
+                operationToken = CancellationToken.None;
+                operationCancellation = null;
+
+                if (wasCancelled)
+                {
+                    Log(OperationCancellationPolicy.CancelledLogLine);
+                }
+                else if (t.IsFaulted)
                 {
                     string message = t.Exception == null ? "未知错误" : t.Exception.GetBaseException().Message;
                     Log("失败摘要：" + title + "未完成。原因：" + message);
@@ -1602,9 +1749,63 @@ public sealed class ManagerForm : Form
                 {
                     Log("完成。");
                 }
+
+                if (cancellation != null)
+                    cancellation.Dispose();
+
                 RefreshState();
             });
         });
+    }
+
+    /// <summary>
+    /// Stops the running operation: signals the token and terminates the child process
+    /// tree, so a multi-minute build does not keep consuming the machine after the user
+    /// has asked it to stop.
+    /// </summary>
+    private void CancelOperation()
+    {
+        CancellationTokenSource cancellation = operationCancellation;
+        if (cancellation == null)
+            return;
+
+        Log("正在取消" + (String.IsNullOrEmpty(runningOperationTitle) ? "" : "：" + runningOperationTitle) + "...");
+        try
+        {
+            cancellation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        Process child = runningToolProcess;
+        if (child != null)
+            KillProcessTree(child);
+    }
+
+    /// <summary>
+    /// Terminates a child and its descendants. taskkill is used rather than
+    /// Process.Kill(true) because the compiler's reference assemblies predate the
+    /// whole-tree overload, and /T is what stops pnpm's node grandchild.
+    /// </summary>
+    private void KillProcessTree(Process child)
+    {
+        try
+        {
+            if (child.HasExited)
+                return;
+            int processId = child.Id;
+            RunTool("taskkill.exe", OperationCancellationPolicy.BuildTaskkillArguments(processId), Root);
+            Log("已结束子进程树（PID " + processId + "）。");
+        }
+        catch (Exception ex)
+        {
+            // The process exiting between the check and the kill is the ordinary race,
+            // not a failure worth alarming about.
+            if (!OperationCancellationPolicy.IsExpectedKillRace(ex))
+                Log("结束子进程时出错：" + ex.Message);
+        }
     }
 
     /// <summary>
@@ -1614,18 +1815,53 @@ public sealed class ManagerForm : Form
     /// </summary>
     private void SetButtons(bool enabled, HarnessStatusSnapshot snapshot)
     {
-        installButton.Text = snapshot.Installed && !snapshot.Ready ? "修复安装" : "一键安装";
-        installButton.Enabled = enabled && (!snapshot.Installed || !snapshot.Ready) && !snapshot.MultipleInstalls;
-        startButton.Enabled = enabled && snapshot.Ready && !snapshot.PortBusy && !snapshot.MultipleInstalls;
-        restartButton.Enabled = enabled && snapshot.Ready && snapshot.Running && !snapshot.MultipleInstalls;
-        stopButton.Enabled = enabled && snapshot.Running && !snapshot.MultipleInstalls;
-        updateButton.Enabled = enabled && snapshot.Ready && !snapshot.MultipleInstalls;
-        openButton.Enabled = enabled && snapshot.Running;
-        rescanButton.Enabled = enabled;
-        openFolderButton.Enabled = enabled && Directory.Exists(Root);
-        uninstallButton.Enabled = enabled && snapshot.Installed && !snapshot.MultipleInstalls;
+        bool cancellable = operationCancellation != null;
+
+        installButton.Text = cancellable
+            ? OperationCancellationPolicy.CancelButtonText
+            : (snapshot.Installed && !snapshot.Ready ? "修复安装" : "一键安装");
+        updateButton.Text = cancellable
+            ? OperationCancellationPolicy.CancelButtonText
+            : "检查 Harness 更新";
+
+        // Every other action is disabled first, so no state can leave one of them live
+        // during an operation. That also makes the early return below safe.
+        startButton.Enabled = false;
+        restartButton.Enabled = false;
+        stopButton.Enabled = false;
+        openButton.Enabled = false;
+        rescanButton.Enabled = false;
+        openFolderButton.Enabled = false;
+        uninstallButton.Enabled = false;
+        browseButton.Enabled = false;
+
+        if (cancellable)
+        {
+            // While a cancellable operation runs, the two buttons that could have
+            // started it stay live as the way to stop it.
+            installButton.Enabled = true;
+            updateButton.Enabled = true;
+            return;
+        }
+
+        if (!enabled)
+        {
+            installButton.Enabled = false;
+            updateButton.Enabled = false;
+            return;
+        }
+
+        installButton.Enabled = (!snapshot.Installed || !snapshot.Ready) && !snapshot.MultipleInstalls;
+        updateButton.Enabled = snapshot.Ready && !snapshot.MultipleInstalls;
+        startButton.Enabled = snapshot.Ready && !snapshot.PortBusy && !snapshot.MultipleInstalls;
+        restartButton.Enabled = snapshot.Ready && snapshot.Running && !snapshot.MultipleInstalls;
+        stopButton.Enabled = snapshot.Running && !snapshot.MultipleInstalls;
+        openButton.Enabled = snapshot.Running;
+        rescanButton.Enabled = true;
+        openFolderButton.Enabled = Directory.Exists(Root);
+        uninstallButton.Enabled = snapshot.Installed && !snapshot.MultipleInstalls;
         // Choosing a directory only matters before an install locks it in.
-        browseButton.Enabled = enabled && !snapshot.Installed && !snapshot.MultipleInstalls;
+        browseButton.Enabled = !snapshot.Installed && !snapshot.MultipleInstalls;
     }
 
     private void Log(string message)
@@ -1760,6 +1996,7 @@ public sealed class ManagerForm : Form
             DeleteDirectoryTree(stage);
         try
         {
+            operationToken.ThrowIfCancellationRequested();
             string commit = await DownloadSourceAsync(stage);
             if (Directory.Exists(installRoot))
             {
@@ -2101,6 +2338,7 @@ public sealed class ManagerForm : Form
     private async Task ApplyUpdateAsync()
     {
         await StopAsync();
+        operationToken.ThrowIfCancellationRequested();
         string stage = Root + ".dsh-update";
         if (Directory.Exists(stage)) DeleteDirectoryTree(stage);
         string backup = Root + ".dsh-backup";
@@ -2272,16 +2510,24 @@ public sealed class ManagerForm : Form
         Directory.CreateDirectory(runtimeRoot);
         string extract = Path.Combine(Path.GetTempPath(), "dsh-node-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(extract);
-        ZipFile.ExtractToDirectory(zip, extract);
-        string extracted = null;
-        foreach (string dir in Directory.GetDirectories(extract, "node-v*-win-x64"))
-            extracted = dir;
-        if (String.IsNullOrEmpty(extracted))
-            throw new InvalidOperationException("Node.js 压缩包内容不符合预期。");
-        if (Directory.Exists(Runtime)) DeleteDirectoryTree(Runtime);
-        CopyDirectory(extracted, Path.Combine(runtimeRoot, "node"));
-        Directory.Delete(extract, true);
-        selectedNodeDirectory = Runtime;
+        try
+        {
+            ZipFile.ExtractToDirectory(zip, extract);
+            string extracted = null;
+            foreach (string dir in Directory.GetDirectories(extract, "node-v*-win-x64"))
+                extracted = dir;
+            if (String.IsNullOrEmpty(extracted))
+                throw new InvalidOperationException("Node.js 压缩包内容不符合预期。");
+            if (Directory.Exists(Runtime)) DeleteDirectoryTree(Runtime);
+            CopyDirectory(extracted, Path.Combine(runtimeRoot, "node"));
+            selectedNodeDirectory = Runtime;
+        }
+        finally
+        {
+            // Without this the extraction directory is stranded whenever anything in
+            // the block above fails, which is exactly the case a repair run hits.
+            TryDeleteDirectory(extract);
+        }
     }
 
     private async Task<string> DownloadSourceAsync(string destination)
@@ -2596,16 +2842,22 @@ public sealed class ManagerForm : Form
     {
         for (int attempt = 1; attempt <= 2; attempt++)
         {
+            // Stop before starting another attempt once the user has asked to cancel.
+            operationToken.ThrowIfCancellationRequested();
             Log("> " + command + (attempt == 1 ? "" : "（第 2 次尝试）"));
             ProcessStartInfo psi = NewToolProcess(command, workingDirectory);
             ProcessExecutionResult result = await RunProcessDetailedAsync(psi);
             if (result.ExitCode == 0)
                 return;
 
+            // A process killed by the cancellation also returns non-zero; report the
+            // cancellation rather than dressing it up as a build failure.
+            operationToken.ThrowIfCancellationRequested();
+
             if (BuildRetryPolicy.ShouldRetry(command, attempt))
             {
                 Log("构建第一次失败，正在自动重试；这通常是首次生成依赖或缓存并发造成的临时错误。");
-                await Task.Delay(1000);
+                await Task.Delay(1000, operationToken);
                 continue;
             }
 
@@ -2650,6 +2902,8 @@ public sealed class ManagerForm : Form
         var standardOutput = new StringBuilder();
         var standardError = new StringBuilder();
         process.Start();
+        // Publish the handle so a cancellation can stop this tree rather than orphan it.
+        runningToolProcess = process;
         Task output = Task.Run(async delegate
         {
             string line;
@@ -2670,6 +2924,7 @@ public sealed class ManagerForm : Form
         });
         await Task.Run(delegate { process.WaitForExit(); });
         await Task.WhenAll(output, error);
+        runningToolProcess = null;
         return new ProcessExecutionResult(process.ExitCode, standardOutput.ToString(), standardError.ToString());
     }
 
@@ -2938,6 +3193,10 @@ public sealed class ManagerForm : Form
             ProcessStartInfo psi = NewNodeProcess(arguments, Root);
             ProcessExecutionResult result = await RunProcessDetailedAsync(psi);
             string report = (result.StandardOutput ?? "").Trim();
+
+            // A killed download reports a non-zero exit; surface the cancellation as
+            // such instead of blaming the network.
+            operationToken.ThrowIfCancellationRequested();
 
             if (result.ExitCode != 0 || NodeNetworkPolicy.IsFailureReport(report))
             {

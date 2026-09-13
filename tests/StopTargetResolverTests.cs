@@ -60,6 +60,7 @@ public static class StopTargetResolverTests
         HarnessUpdatePolicyTests.Run();
         SingleInstancePolicyTests.Run();
         HarnessStatusChangePolicyTests.Run();
+        OperationCancellationPolicyTests.Run();
 
         AssertResolution(
             StopTargetKind.None,
