@@ -925,6 +925,88 @@ public static class UiMeasure
 }
 
 /// <summary>
+/// Every height the layout needs, derived from the fonts rather than hard-coded.
+///
+/// A fixed pixel height is only correct at one text size. On a display with scaling the
+/// same point size renders taller, the text outgrows its container, and the bottom of it
+/// is clipped. Deriving each height from the font it has to contain makes the layout
+/// follow the text instead of assuming it.
+/// </summary>
+public static class UiMetrics
+{
+    /// <summary>Height of a bordered or filled value box.</summary>
+    public static int FieldHeight()
+    {
+        return Math.Max(42, UiStyle.BodyFont().Height + 24);
+    }
+
+    /// <summary>Height of a caption line above a field.</summary>
+    public static int CaptionHeight()
+    {
+        return Math.Max(22, UiStyle.LabelFont().Height + 5);
+    }
+
+    /// <summary>Gap between a caption and the value under it.</summary>
+    public const int CaptionGap = 6;
+
+    /// <summary>Height of a card's title row.</summary>
+    public static int CardTitleHeight()
+    {
+        return Math.Max(30, UiStyle.CardTitleFont().Height + 9);
+    }
+
+    /// <summary>Card padding above and below its contents.</summary>
+    public const int CardPaddingY = 16;
+
+    /// <summary>Height of an action button.</summary>
+    public static int ButtonHeight()
+    {
+        return Math.Max(UiStyle.ButtonHeight, UiStyle.ButtonFont().Height + 26);
+    }
+
+    /// <summary>Height of a log toolbar control.</summary>
+    public static int ToolHeight()
+    {
+        return Math.Max(UiStyle.ToolButtonHeight, UiStyle.ButtonFont().Height + 20);
+    }
+
+    /// <summary>Height of the search field, which follows the toolbar.</summary>
+    public static int SearchHeight()
+    {
+        return Math.Max(30, UiStyle.BodyFont().Height + 12);
+    }
+
+    /// <summary>
+    /// The height a card needs for a title plus one row of fields: the runtime information
+    /// card, which is the tallest of the fixed rows.
+    /// </summary>
+    public static int InfoCardHeight()
+    {
+        return CardPaddingY + CardTitleHeight() + CaptionHeight() + CaptionGap + FieldHeight() + CardPaddingY;
+    }
+
+    /// <summary>The height a card needs for a title plus a single row of buttons.</summary>
+    public static int ActionCardHeight()
+    {
+        return CardPaddingY + CardTitleHeight() + Math.Max(ButtonHeight(), ToolHeight()) + CardPaddingY;
+    }
+
+    /// <summary>The header band: the brand mark, which is the tallest thing in it.</summary>
+    public static int HeaderHeight()
+    {
+        int mark = BrandMarkSize();
+        int text = UiStyle.TitleFont().Height + UiStyle.SubtitleFont().Height + 2;
+        return Math.Max(mark, text) + 10;
+    }
+
+    /// <summary>The brand mark's square size.</summary>
+    public static int BrandMarkSize()
+    {
+        return Math.Max(44, UiStyle.TitleFont().Height + 26);
+    }
+}
+
+/// <summary>
 /// Shared geometry. Small helpers so the drawn shapes agree everywhere.
 /// </summary>
 public static class UiShapes
@@ -1615,8 +1697,8 @@ public static class UiStyle
     public static readonly Color WindowBackground = Color.FromArgb(0xEE, 0xF0, 0xF3);
     public static readonly Color CardBackground = Color.White;
     public static readonly Color CardBorder = Color.FromArgb(0xE8, 0xEA, 0xEE);
-    public static readonly Color FieldBackground = Color.FromArgb(0xF6, 0xF7, 0xF9);
-    public static readonly Color FieldBorder = Color.FromArgb(0xE4, 0xE7, 0xEB);
+    public static readonly Color FieldBackground = Color.FromArgb(0xEF, 0xF1, 0xF4);
+    public static readonly Color FieldBorder = Color.FromArgb(0xDA, 0xDE, 0xE4);
     public static readonly Color Divider = Color.FromArgb(0xF0, 0xF1, 0xF4);
 
     /// <summary>The soft shadow under a card. Very light: it should suggest depth, not announce itself.</summary>
@@ -2681,7 +2763,7 @@ public sealed class ManagerForm : Form
         // Sized to the design: the info card needs four columns side by side, and the
         // action row needs all nine buttons on one line.
         Width = 1116;
-        Height = 986;
+        Height = 800;
         MinimumSize = new Size(980, 760);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9F);
@@ -2879,9 +2961,9 @@ public sealed class ManagerForm : Form
         rootLayout.BackColor = UiStyle.WindowBackground;
         // Tight rhythm: the header, then two cards sized to their content, then the log.
         // The gaps are deliberately small so the three cards read as one screen.
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.HeaderHeight()));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.InfoCardHeight() + UiStyle.CardGap));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.ActionCardHeight() + UiStyle.CardGap));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiStyle.LogMinHeight));
         Controls.Add(rootLayout);
 
@@ -2894,9 +2976,7 @@ public sealed class ManagerForm : Form
 
         // The window is exactly as tall as its content, so there is no dead space to fill.
         FitWindowToContent();
-
     }
-
     /// <summary>
     /// Sizes the log region to the text it holds, then the window to the whole layout.
     ///
@@ -2919,10 +2999,12 @@ public sealed class ManagerForm : Form
             wanted = UiStyle.LogMaxHeight;
 
         // The region needs room for the card's padding, its title row, and the toolbar.
-        int rowHeight = wanted + 24 + 34 + 16;
+        int rowHeight = wanted + UiMetrics.CardPaddingY + UiMetrics.CardTitleHeight() + 8 + UiMetrics.ToolHeight() + 8;
         rootLayout.RowStyles[3] = new RowStyle(SizeType.Absolute, rowHeight);
 
-        int total = 56 + 148 + 122 + rowHeight + (UiStyle.CardGap * 3) + (UiStyle.OuterMargin * 2);
+        int total = UiMetrics.HeaderHeight() + (UiMetrics.InfoCardHeight() + UiStyle.CardGap)
+            + (UiMetrics.ActionCardHeight() + UiStyle.CardGap) + rowHeight
+            + (UiStyle.CardGap * 3) + (UiStyle.OuterMargin * 2);
         ClientSize = new Size(ClientSize.Width, total);
     }
 
@@ -3098,7 +3180,7 @@ public sealed class ManagerForm : Form
         captionLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         field.Controls.Add(captionLabel);
 
-        value.Bounds = new Rectangle(0, captionHeight + 4, 400, valueHeight);
+        value.Bounds = new Rectangle(0, captionHeight + UiMetrics.CaptionGap, 400, valueHeight);
         value.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         field.Controls.Add(value);
 
@@ -3126,7 +3208,7 @@ public sealed class ManagerForm : Form
         inside.ColumnCount = 1;
         inside.RowCount = 2;
         inside.BackColor = UiStyle.CardBackground;
-        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.CardTitleHeight()));
         inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         inside.Controls.Add(BuildCardTitle("运行信息"), 0, 0);
 
@@ -3159,10 +3241,10 @@ public sealed class ManagerForm : Form
         versionLabel.Padding = new Padding(12, 0, 12, 0);
         versionLabel.AutoEllipsis = true;
 
-        cells.Controls.Add(BuildField("安装目录", pathBox, 24, UiStyle.FieldHeight), 0, 0);
-        cells.Controls.Add(BuildField("状态", statusLabel, 24, UiStyle.FieldHeight), 1, 0);
-        cells.Controls.Add(BuildField("运行状态", runningLabel, 24, UiStyle.FieldHeight), 2, 0);
-        cells.Controls.Add(BuildField("Harness 版本", versionLabel, 24, UiStyle.FieldHeight), 3, 0);
+        cells.Controls.Add(BuildField("安装目录", pathBox, UiMetrics.CaptionHeight(), UiMetrics.FieldHeight()), 0, 0);
+        cells.Controls.Add(BuildField("状态", statusLabel, UiMetrics.CaptionHeight(), UiMetrics.FieldHeight()), 1, 0);
+        cells.Controls.Add(BuildField("运行状态", runningLabel, UiMetrics.CaptionHeight(), UiMetrics.FieldHeight()), 2, 0);
+        cells.Controls.Add(BuildField("Harness 版本", versionLabel, UiMetrics.CaptionHeight(), UiMetrics.FieldHeight()), 3, 0);
         inside.Controls.Add(cells, 0, 1);
         card.Controls.Add(inside);
         return card;
@@ -3236,7 +3318,7 @@ public sealed class ManagerForm : Form
         flat.Icon = icon;
         flat.IsPrimary = primary;
         flat.AutoSize = false;
-        flat.Height = UiStyle.ButtonHeight;
+        flat.Height = UiMetrics.ButtonHeight();
         flat.Width = UiMeasure.MeasureButtonWidth(text, icon);
         flat.Margin = new Padding(0, 0, 7, 0);
         flat.Click += handler;
@@ -3255,8 +3337,8 @@ public sealed class ManagerForm : Form
         inside.ColumnCount = 1;
         inside.RowCount = 3;
         inside.BackColor = UiStyle.CardBackground;
-        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.CardTitleHeight() + 8));
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.ToolHeight() + 8));
         inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         // Title and the toolbar share one row, as in the design.
@@ -3301,7 +3383,7 @@ public sealed class ManagerForm : Form
         // to compute the offset, so the toolbar was placed to the left of where its cell
         // ended and the rightmost buttons fell outside the card.
         toolbar.Dock = DockStyle.Right;
-        toolbar.Height = UiStyle.ToolButtonHeight + 2;
+        toolbar.Height = UiMetrics.ToolHeight();
         toolbar.Width = 730;
         toolbar.FlowDirection = FlowDirection.RightToLeft;
         toolbar.WrapContents = false;
@@ -3325,7 +3407,7 @@ public sealed class ManagerForm : Form
         logMatchLabel.ForeColor = UiStyle.TextSecondary;
         logMatchLabel.BackColor = UiStyle.CardBackground;
         logMatchLabel.TextAlign = ContentAlignment.MiddleLeft;
-        logMatchLabel.Height = UiStyle.ToolButtonHeight;
+        logMatchLabel.Height = UiMetrics.ToolHeight();
         logMatchLabel.Width = 84;
         logMatchLabel.Margin = new Padding(2, 0, 4, 0);
         toolbar.Controls.Add(logMatchLabel);
@@ -3333,7 +3415,7 @@ public sealed class ManagerForm : Form
         // A host so the search box can stretch while keeping a preferred height: a TextBox
         // in a flow panel ignores Dock when AutoSize is off unless it has a container.
         var searchHost = new Panel();
-        searchHost.Height = UiStyle.ToolButtonHeight;
+        searchHost.Height = UiMetrics.ToolHeight();
         searchHost.Width = 340;
         searchHost.Margin = new Padding(0, 0, 4, 0);
         searchHost.BackColor = UiStyle.CardBackground;
@@ -3343,7 +3425,7 @@ public sealed class ManagerForm : Form
         logSearchBox.TextChanged += delegate { ApplyLogHighlight(); };
         logSearchBox.Location = new Point(0, 8);
         logSearchBox.Width = 336;
-        logSearchBox.Height = 24;
+        logSearchBox.Height = UiMetrics.SearchHeight();
         logSearchBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         searchHost.Controls.Add(logSearchBox);
 
@@ -3351,7 +3433,7 @@ public sealed class ManagerForm : Form
         // and a painter sibling is simpler than subclassing the control.
         var hint = new Label();
         hint.AutoSize = false;
-        hint.Bounds = new Rectangle(8, 8, 328, 24);
+        hint.Bounds = new Rectangle(8, (UiMetrics.ToolHeight() - UiMetrics.SearchHeight()) / 2, 328, UiMetrics.SearchHeight());
         hint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         hint.BackColor = Color.Transparent;
         hint.ForeColor = UiStyle.TextSecondary;
@@ -3408,7 +3490,7 @@ public sealed class ManagerForm : Form
         flat.IsPrimary = false;
         // Sized to its own label: a fixed width clipped "上一个" to "上...".
         flat.AutoSize = false;
-        flat.Height = UiStyle.ToolButtonHeight;
+        flat.Height = UiMetrics.ToolHeight();
         flat.Width = UiMeasure.MeasureToolbarButtonWidth(text, icon);
         flat.Margin = new Padding(0, 2, 4, 0);
         flat.Click += handler;
