@@ -5,7 +5,6 @@ public static class HarnessProfileDiagnosticsTests
     public static int Main()
     {
         Run();
-        Console.WriteLine("Harness profile diagnostics tests passed.");
         return 0;
     }
 
@@ -27,5 +26,7 @@ public static class HarnessProfileDiagnosticsTests
             throw new InvalidOperationException("The startup hint should explain the configured extension count.");
         if (HarnessProfileDiagnostics.BuildStartupHint(2, 0) != "")
             throw new InvalidOperationException("Official-only profiles should not produce an unnecessary warning.");
+        // Printed here, not in Main: the aggregate entry point calls Run() directly.
+        Console.WriteLine("Harness profile diagnostics tests passed.");
     }
 }

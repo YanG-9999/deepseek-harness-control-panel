@@ -5,7 +5,6 @@ public static class HarnessLifecyclePolicyTests
     public static int Main()
     {
         Run();
-        Console.WriteLine("Harness lifecycle policy tests passed.");
         return 0;
     }
 
@@ -34,5 +33,7 @@ public static class HarnessLifecyclePolicyTests
             throw new InvalidOperationException("The no-port startup failure should name the failed stage.");
         if (!HarnessLifecyclePolicy.StartupFailureMessage(true, false).Contains("页面尚未可访问"))
             throw new InvalidOperationException("The no-page startup failure should name the failed stage.");
+        // Printed here, not in Main: the aggregate entry point calls Run() directly.
+        Console.WriteLine("Harness lifecycle policy tests passed.");
     }
 }

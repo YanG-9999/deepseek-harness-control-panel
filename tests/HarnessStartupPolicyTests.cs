@@ -5,7 +5,6 @@ public static class HarnessStartupPolicyTests
     public static int Main()
     {
         Run();
-        Console.WriteLine("Harness startup policy tests passed.");
         return 0;
     }
 
@@ -42,5 +41,7 @@ public static class HarnessStartupPolicyTests
             throw new InvalidOperationException("A different port must not be treated as the managed Harness service.");
         if (HarnessStartupPolicy.IsWebReadyLine("dsh web: http://127.0.0.1:30808", 3080))
             throw new InvalidOperationException("A port with the managed port as a prefix must not be treated as ready.");
+        // Printed here, not in Main: the aggregate entry point calls Run() directly.
+        Console.WriteLine("Harness startup policy tests passed.");
     }
 }
