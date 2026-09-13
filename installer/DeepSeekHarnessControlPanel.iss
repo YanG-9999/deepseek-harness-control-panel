@@ -14,9 +14,9 @@
 #define AppPublisher "DeepSeek Harness"
 #define AppExeName "DeepSeekHarnessControlPanel.exe"
 ; AppId 一旦发布就不能改：它决定升级时能否识别出旧版本。
-; 必须同时用 {{ 和 }} 包裹：只写一个 } 会让 Inno 把它当成普通字符串而不是 GUID 常量，
-; 结果是升级时并排安装第二份，而不是替换旧版本。
-#define AppId "{{8F3C1D42-7B6A-4E21-9C4D-2A5E7F1B0C93}}"
+; 开头的 { 必须写成 {{：单个 { 会被 Inno 当成参数展开（如 {app}），而不是 AppId 的一部分。
+; 结尾的 } 不需要再转义，多写一个会原样进入注册表键名（卸载项显示为 ...}}_is1）。
+#define AppId "{{8F3C1D42-7B6A-4E21-9C4D-2A5E7F1B0C93}"
 
 [Setup]
 AppId={#AppId}
@@ -48,6 +48,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; 安装包自身也带产品图标：默认的 Inno 图标会让"这是个什么程序"变得含糊。
+SetupIconFile=..\assets\DeepSeekHarness.ico
 
 ; 面板持有这个互斥量时提示用户先退出，避免覆盖正在运行的程序文件。
 ; 名字必须与源码里的 Program.MutexName 一致。
@@ -55,12 +57,18 @@ AppMutex=Local\DeepSeekHarnessControlPanel.SingleInstance
 SetupMutex=Local\DeepSeekHarnessControlPanel.Setup
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Default.isl"
+; Inno Setup 6 不自带简体中文，Default.isl 是英文，所以向导正文是英文。
+; 要显示中文，需要把社区翻译 ChineseSimplified.isl 放进 installer\ 再指向它。
+; 这里的中文只覆盖本脚本自带的说明与提示（见 [Tasks] 和 [Code]）。
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 ; 默认不勾选：未经同意就自启容易招人反感，也容易被安全软件针对。
 ; 面板内也有同样的开关，两者写入同一处注册表项。
 Name: "autostart"; Description: "开机时自动启动控制面板（可稍后在面板内更改）"; GroupDescription: "附加选项:"; Flags: unchecked
+; 桌面快捷方式同样默认不勾选。这条任务必须存在：[Icons] 里的桌面项引用了它，
+; 缺了它整个脚本无法编译（"unknown task"）。
+Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项:"; Flags: unchecked
 
 [Files]
 Source: "..\bin\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion

@@ -63,13 +63,15 @@ Assert-Iss ($issDirectives -notmatch '(?m)^\s*DefaultDirName\s*=\s*\{pf\}') `
     'DefaultDirName must not be under Program Files: that would require elevation.'
 
 # --- upgrade identity -------------------------------------------------------
-# Inno treats a literal { at the start of AppId as a constant, so the value must be a
-# GUID inside escaped braces. Checking for the GUID text itself is what matters:
-# without it, an upgrade installs a second copy beside the first.
+# Inno expands {name} constants inside [Setup] values, so a literal { has to be written as
+# {{. Only the opening brace needs that: a trailing }} is not an escape and lands in the
+# AppId verbatim, which is what put "}}_is1" in the uninstall key. Checking for the GUID
+# text itself is what matters: without it, an upgrade installs a second copy beside the
+# first.
 Assert-Iss ($issDirectives -match '(?m)^\s*AppId\s*=\s*\{') `
     'AppId must be set, otherwise an upgrade installs side by side.'
-Assert-Iss ($issDirectives -match '#define\s+AppId\s+"\{\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}\}"') `
-    'AppId must be an explicit GUID in escaped braces.'
+Assert-Iss ($issDirectives -match '#define\s+AppId\s+"\{\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}(?!\})"') `
+    'AppId must be an explicit GUID: {{ at the start, exactly one } at the end.'
 
 # --- mutual exclusion with the running panel --------------------------------
 # The name has to match the mutex the panel creates, or setup will overwrite a
@@ -115,6 +117,27 @@ Assert-Iss ($null -ne $tasksBody) 'A [Tasks] section is required for the optiona
 if ($null -ne $tasksBody) {
     Assert-Iss ($tasksBody -match 'Name:\s*"autostart"') 'The installer must offer an auto-start task.'
     Assert-Iss ($tasksBody -match 'Flags:.*unchecked') 'The auto-start task must be unchecked by default.'
+}
+
+# --- every referenced task exists -------------------------------------------
+# A directive that names a task nobody defined stops ISCC with "unknown task" and takes
+# the whole script down. That is invisible without Inno Setup installed, and the desktop
+# shortcut shipped that way, so the reference and the definition are checked together.
+$definedTasks = @()
+if ($null -ne $tasksBody) {
+    $definedTasks = @([regex]::Matches($tasksBody, '(?m)^\s*Name:\s*"?([A-Za-z0-9_]+)"?') |
+        ForEach-Object { $_.Groups[1].Value })
+}
+# "Tasks:" is not the first parameter on the line: the desktop shortcut reads
+# 'Name: "{autodesktop}\..."; Filename: "..."; Tasks: desktopicon'. So the value is taken
+# from wherever the parameter appears, up to the end of the line.
+foreach ($reference in [regex]::Matches($issDirectives, '(?m)\bTasks:\s*([^\r\n]+)')) {
+    $names = @($reference.Groups[1].Value -split '[,\s]+' | Where-Object { $_.Trim().Length -gt 0 })
+    foreach ($name in $names) {
+        $clean = $name.Trim().Trim('"').TrimStart('!')
+        Assert-Iss ($definedTasks -contains $clean) `
+            ("A directive references the task '{0}', which [Tasks] never defines; ISCC refuses to compile that." -f $clean)
+    }
 }
 
 $registryBody = Get-IssSection 'Registry'
