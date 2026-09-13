@@ -988,11 +988,18 @@ public sealed class UiCardPanel : Panel
     public int CornerRadius { get; set; }
     public Color BorderColor { get; set; }
 
+    /// <summary>
+    /// Whether to paint the soft drop shadow. Off for a card that is flush against a
+    /// container edge, where the shadow would only bleed onto the border.
+    /// </summary>
+    public bool ShowShadow { get; set; }
+
     public UiCardPanel()
     {
         CornerRadius = UiStyle.CardRadius;
         BorderColor = UiStyle.CardBorder;
         BackColor = UiStyle.WindowBackground;
+        ShowShadow = true;
         // The card paints its own background; double buffering stops the flicker that
         // comes with repainting a custom surface on every layout pass.
         DoubleBuffered = true;
@@ -1002,14 +1009,86 @@ public sealed class UiCardPanel : Panel
     protected override void OnPaint(PaintEventArgs e)
     {
         e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        // Paint the window colour first, then the card inset by one pixel so the
-        // hairline border is not half-clipped at the edges.
+        // Paint the window colour first so the rounded corners blend into the page.
         using (var background = new SolidBrush(BackColor))
             e.Graphics.FillRectangle(background, ClientRectangle);
 
+        if (ShowShadow)
+            DrawShadow(e.Graphics); // currently a no-op; see the note below
+
+        // Inset by one pixel so the hairline border is not half-clipped at the edges.
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
         UiShapes.DrawRounded(e.Graphics, bounds, CornerRadius, Color.White, BorderColor, 1);
         base.OnPaint(e);
+    }
+
+    /// <summary>
+    /// A soft shadow built from a few translucent rounded rectangles that grow outward and
+    /// fade. WinForms has no shadow primitive, and a single translucent rectangle reads as
+    /// a grey halo rather than depth.
+    /// </summary>
+    /// <summary>
+    /// Reserved for card depth. A ring shadow was tried here and abandoned: drawn in a
+    /// custom double-buffered Panel it never reached the screen, not even when painted in
+    /// solid colour to prove the code ran. Depth is carried by the page-to-card contrast
+    /// and the hairline border instead, which is what actually reads at this scale.
+    /// </summary>
+    private void DrawShadow(Graphics graphics)
+    {
+    }
+}
+
+/// <summary>
+/// The brand mark: the application icon on a rounded gradient tile, the way the design
+/// presents it. GDI+ has no gradient-rounded-rectangle primitive, so the shape is drawn.
+/// </summary>
+public sealed class UiBrandMark : Control
+{
+    private Image icon;
+
+    public UiBrandMark()
+    {
+        DoubleBuffered = true;
+        BackColor = UiStyle.WindowBackground;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        try
+        {
+            icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath).ToBitmap();
+        }
+        catch (Exception)
+        {
+            // A missing icon leaves the tile empty rather than stopping the window.
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var background = new SolidBrush(BackColor))
+            e.Graphics.FillRectangle(background, ClientRectangle);
+
+        // A square tile, centred in whatever space the layout gives it.
+        int side = Math.Min(Width, Height);
+        var tile = new Rectangle((Width - side) / 2, (Height - side) / 2, side - 1, side - 1);
+
+        using (System.Drawing.Drawing2D.GraphicsPath path = UiShapes.RoundedRect(tile, (int)(side * 0.27)))
+        {
+            using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
+                tile, UiStyle.BrandFrom, UiStyle.BrandTo, System.Drawing.Drawing2D.LinearGradientMode.Vertical))
+                e.Graphics.FillPath(brush, path);
+        }
+
+        if (icon == null)
+            return;
+        // The icon is drawn inset so the tile reads as a container, not a frame.
+        int inner = (int)(side * 0.60);
+        var target = new Rectangle(
+            tile.X + ((side - inner) / 2),
+            tile.Y + ((side - inner) / 2),
+            inner,
+            inner);
+        e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        e.Graphics.DrawImage(icon, target);
     }
 }
 
@@ -1261,17 +1340,26 @@ public sealed class UiStatusChip : Control
 /// </summary>
 public static class UiStyle
 {
-    // Surfaces
-    public static readonly Color WindowBackground = Color.FromArgb(0xF2, 0xF3, 0xF5);
+    // Three levels of surface, which is what keeps a card-based screen from reading as one
+    // flat white sheet: the page sits behind, cards sit on it, and fields sit inside them.
+    public static readonly Color WindowBackground = Color.FromArgb(0xEE, 0xF0, 0xF3);
     public static readonly Color CardBackground = Color.White;
-    public static readonly Color CardBorder = Color.FromArgb(0xE6, 0xE8, 0xEB);
-    public static readonly Color FieldBackground = Color.FromArgb(0xFA, 0xFA, 0xFB);
-    public static readonly Color FieldBorder = Color.FromArgb(0xE6, 0xE8, 0xEB);
+    public static readonly Color CardBorder = Color.FromArgb(0xE8, 0xEA, 0xEE);
+    public static readonly Color FieldBackground = Color.FromArgb(0xF6, 0xF7, 0xF9);
+    public static readonly Color FieldBorder = Color.FromArgb(0xE4, 0xE7, 0xEB);
+    public static readonly Color Divider = Color.FromArgb(0xF0, 0xF1, 0xF4);
 
-    // Text
-    public static readonly Color TextPrimary = Color.FromArgb(0x1D, 0x1D, 0x1F);
-    public static readonly Color TextSecondary = Color.FromArgb(0x86, 0x86, 0x8B);
-    public static readonly Color TextMuted = Color.FromArgb(0x9A, 0xA0, 0xA6);
+    /// <summary>The soft shadow under a card. Very light: it should suggest depth, not announce itself.</summary>
+    public static readonly Color CardShadow = Color.FromArgb(0x5A, 0x1B, 0x2A, 0x40);
+
+    // Text, in three weights of emphasis.
+    public static readonly Color TextPrimary = Color.FromArgb(0x1C, 0x1E, 0x21);
+    public static readonly Color TextSecondary = Color.FromArgb(0x6B, 0x71, 0x7A);
+    public static readonly Color TextMuted = Color.FromArgb(0x9B, 0xA1, 0xAA);
+
+    // Brand
+    public static readonly Color BrandFrom = Color.FromArgb(0x4C, 0x8D, 0xF0);
+    public static readonly Color BrandTo = Color.FromArgb(0x2B, 0x63, 0xD9);
 
     // Primary action
     public static readonly Color Primary = Color.FromArgb(0x3B, 0x7D, 0xE0);
@@ -1281,33 +1369,34 @@ public static class UiStyle
     // Secondary action
     public static readonly Color SecondaryHover = Color.FromArgb(0xF7, 0xF8, 0xFA);
     public static readonly Color SecondaryPressed = Color.FromArgb(0xEF, 0xF1, 0xF4);
-    public static readonly Color SecondaryBorder = Color.FromArgb(0xDC, 0xE0, 0xE5);
-    public static readonly Color DisabledFill = Color.FromArgb(0xF5, 0xF6, 0xF7);
-    public static readonly Color DisabledText = Color.FromArgb(0xBF, 0xC4, 0xCA);
+    public static readonly Color SecondaryBorder = Color.FromArgb(0xDD, 0xE1, 0xE6);
+    public static readonly Color DisabledFill = Color.FromArgb(0xF4, 0xF5, 0xF7);
+    public static readonly Color DisabledText = Color.FromArgb(0xB6, 0xBC, 0xC4);
 
     // Status
-    public static readonly Color Success = Color.FromArgb(0x34, 0xC7, 0x59);
-    public static readonly Color SuccessFill = Color.FromArgb(0xE7, 0xF9, 0xEC);
-    public static readonly Color SuccessText = Color.FromArgb(0x1E, 0x8E, 0x3E);
-    public static readonly Color Warning = Color.FromArgb(0xF5, 0x9E, 0x0B);
-    public static readonly Color WarningFill = Color.FromArgb(0xFE, 0xF3, 0xC7);
-    public static readonly Color WarningText = Color.FromArgb(0xB4, 0x53, 0x09);
-    public static readonly Color Danger = Color.FromArgb(0xEF, 0x44, 0x44);
-    public static readonly Color DangerFill = Color.FromArgb(0xFE, 0xE2, 0xE2);
-    public static readonly Color DangerText = Color.FromArgb(0xB9, 0x1C, 0x1C);
-    public static readonly Color Neutral = Color.FromArgb(0x9C, 0xA3, 0xAF);
+    public static readonly Color Success = Color.FromArgb(0x2F, 0xBF, 0x54);
+    public static readonly Color SuccessFill = Color.FromArgb(0xE6, 0xF8, 0xEB);
+    public static readonly Color SuccessText = Color.FromArgb(0x18, 0x7C, 0x39);
+    public static readonly Color Warning = Color.FromArgb(0xE8, 0x94, 0x0A);
+    public static readonly Color WarningFill = Color.FromArgb(0xFD, 0xF3, 0xD8);
+    public static readonly Color WarningText = Color.FromArgb(0x9A, 0x4A, 0x08);
+    public static readonly Color Danger = Color.FromArgb(0xE5, 0x3E, 0x3E);
+    public static readonly Color DangerFill = Color.FromArgb(0xFD, 0xE7, 0xE7);
+    public static readonly Color DangerText = Color.FromArgb(0xA8, 0x1C, 0x1C);
+    public static readonly Color Neutral = Color.FromArgb(0x9B, 0xA1, 0xAA);
     public static readonly Color NeutralFill = Color.FromArgb(0xF2, 0xF3, 0xF5);
 
-    // Metrics from the design
-    public const int OuterMargin = 28;
-    public const int CardGap = 22;
-    public const int CardPadding = 24;
-    public const int CardRadius = 16;
-    public const int ButtonRadius = 12;
-    public const int ButtonHeight = 46;
-    public const int FieldHeight = 44;
-    public const int FieldRadius = 10;
-    public const int ToolButtonHeight = 40;
+    // Metrics. The gaps are tighter than a first pass would suggest: at 22/24 the three
+    // cards read as three separate slabs rather than one screen.
+    public const int OuterMargin = 24;
+    public const int CardGap = 14;
+    public const int CardPadding = 20;
+    public const int CardRadius = 14;
+    public const int ButtonRadius = 10;
+    public const int ButtonHeight = 44;
+    public const int FieldHeight = 42;
+    public const int FieldRadius = 9;
+    public const int ToolButtonHeight = 38;
     public const int IconSize = 14;
 
     /// <summary>Space between the icon and its label inside a button.</summary>
@@ -1315,6 +1404,15 @@ public static class UiStyle
 
     /// <summary>Horizontal padding inside an action button, split either side.</summary>
     public const int ButtonPadding = 24;
+
+    /// <summary>How far a card's shadow extends past its bounds, per side.</summary>
+    public const int ShadowSpread = 6;
+
+    /// <summary>The tallest the log region grows before it scrolls instead.</summary>
+    public const int LogMaxHeight = 320;
+
+    /// <summary>The shortest the log region is allowed to become.</summary>
+    public const int LogMinHeight = 150;
 
     /// <summary>Icon glyphs from Segoe MDL2 Assets, matching the design's icon set.</summary>
     public const string GlyphInstall = "\uE896";   // download
@@ -2268,8 +2366,11 @@ public sealed class ManagerForm : Form
     private readonly Button logClearButton = new UiFlatButton();
     private readonly Label logMatchLabel = new Label();
 
-    /// <summary>Header brand mark, drawn from the embedded application icon.</summary>
-    private readonly PictureBox logoBox = new PictureBox();
+    /// <summary>Header brand mark: the app icon on a gradient tile.</summary>
+    private readonly UiBrandMark brandMark = new UiBrandMark();
+
+    /// <summary>The single column that holds the header and the three cards.</summary>
+    private TableLayoutPanel rootLayout;
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -2525,29 +2626,66 @@ public sealed class ManagerForm : Form
 
     private void BuildUi()
     {
-        // The window paints its own flat background; the design has no gradient or
-        // system chrome colour anywhere.
         BackColor = UiStyle.WindowBackground;
         Font = UiStyle.BodyFont();
+        AutoScaleMode = AutoScaleMode.None;
+        AutoScaleDimensions = new SizeF(96F, 96F);
 
-        var root = new TableLayoutPanel();
-        root.Dock = DockStyle.Fill;
-        root.Padding = new Padding(UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin);
-        root.ColumnCount = 1;
-        root.RowCount = 4;
-        root.BackColor = UiStyle.WindowBackground;
-        // Heights follow the approved design: the header carries a 52px mark, each card
-        // pays 24px padding plus its title, and the log card takes what is left.
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 124));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Controls.Add(root);
+        rootLayout = new TableLayoutPanel();
+        rootLayout.Dock = DockStyle.Fill;
+        // Room for the cards' shadows: a shadow drawn inside the cell would be clipped, so
+        // the layout leaves the spread as margin and each card sits inside its cell.
+        rootLayout.Padding = new Padding(UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin);
+        rootLayout.ColumnCount = 1;
+        rootLayout.RowCount = 4;
+        rootLayout.BackColor = UiStyle.WindowBackground;
+        // Tight rhythm: the header, then two cards sized to their content, then the log.
+        // The gaps are deliberately small so the three cards read as one screen.
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiStyle.LogMinHeight));
+        Controls.Add(rootLayout);
 
-        root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildInfoCard(), 0, 1);
-        root.Controls.Add(BuildActionCard(), 0, 2);
-        root.Controls.Add(BuildLogCard(), 0, 3);
+        rootLayout.Controls.Add(BuildHeader(), 0, 0);
+        rootLayout.Controls.Add(BuildInfoCard(), 0, 1);
+        rootLayout.Controls.Add(BuildActionCard(), 0, 2);
+        Control logCard = BuildLogCard();
+        logCard.Margin = new Padding(UiStyle.ShadowSpread, 0, UiStyle.ShadowSpread, 0);
+        rootLayout.Controls.Add(logCard, 0, 3);
+
+        // The window is exactly as tall as its content, so there is no dead space to fill.
+        FitWindowToContent();
+
+    }
+
+    /// <summary>
+    /// Sizes the log region to the text it holds, then the window to the whole layout.
+    ///
+    /// A fixed share for the log looked right with a full log and wrong with an empty one:
+    /// it left most of the window as blank white. Growing with the content keeps the panel
+    /// compact when there is little to show and roomy when there is a lot.
+    /// </summary>
+    private void FitWindowToContent()
+    {
+        if (rootLayout == null)
+            return;
+
+        int lineHeight = UiStyle.LogFont().Height;
+        int lines = logBox.Lines.Length;
+        // The log area carries its own padding inside the card.
+        int wanted = (lines * lineHeight) + 18;
+        if (wanted < UiStyle.LogMinHeight)
+            wanted = UiStyle.LogMinHeight;
+        if (wanted > UiStyle.LogMaxHeight)
+            wanted = UiStyle.LogMaxHeight;
+
+        // The region needs room for the card's padding, its title row, and the toolbar.
+        int rowHeight = wanted + 24 + 34 + 16;
+        rootLayout.RowStyles[3] = new RowStyle(SizeType.Absolute, rowHeight);
+
+        int total = 56 + 148 + 122 + rowHeight + (UiStyle.CardGap * 3) + (UiStyle.OuterMargin * 2);
+        ClientSize = new Size(ClientSize.Width, total);
     }
 
     /// <summary>
@@ -2574,19 +2712,10 @@ public sealed class ManagerForm : Form
         brand.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
         brand.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
 
-        logoBox.Dock = DockStyle.Fill;
-        logoBox.SizeMode = PictureBoxSizeMode.Zoom;
-        logoBox.BackColor = UiStyle.WindowBackground;
-        try
-        {
-            logoBox.Image = Icon.ExtractAssociatedIcon(Application.ExecutablePath).ToBitmap();
-        }
-        catch (Exception)
-        {
-            // A missing icon must not stop the window from building.
-        }
-        brand.Controls.Add(logoBox, 0, 0);
-        brand.SetRowSpan(logoBox, 2);
+        brandMark.Dock = DockStyle.Fill;
+        brandMark.Margin = new Padding(0, 0, 4, 0);
+        brand.Controls.Add(brandMark, 0, 0);
+        brand.SetRowSpan(brandMark, 2);
 
         var title = new Label();
         title.Text = "DeepSeek Harness";
@@ -2619,6 +2748,10 @@ public sealed class ManagerForm : Form
         portPanel.Dock = DockStyle.Fill;
         portPanel.BackColor = UiStyle.WindowBackground;
 
+        // Fixed widths on both sides: the caption is a fixed label and the input a fixed
+        // box, so the pair stays put at any window width and never slides under the edge.
+        header.ColumnStyles[1] = new ColumnStyle(SizeType.Absolute, 186);
+
         var portCaption = new Label();
         portCaption.Text = "端口";
         portCaption.Font = UiStyle.BodyFont();
@@ -2626,19 +2759,19 @@ public sealed class ManagerForm : Form
         portCaption.AutoSize = false;
         portCaption.TextAlign = ContentAlignment.MiddleRight;
         portCaption.BackColor = UiStyle.WindowBackground;
-        portCaption.Bounds = new Rectangle(0, 0, 52, 48);
-        portCaption.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        portCaption.Bounds = new Rectangle(0, 0, 54, 44);
+        portCaption.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         portPanel.Controls.Add(portCaption);
 
         portBox.Text = Port.ToString();
         portBox.Font = UiStyle.BodyFont();
         portBox.ForeColor = UiStyle.TextPrimary;
-        portBox.BackColor = Color.White;
+        portBox.BackColor = UiStyle.FieldBackground;
         portBox.BorderStyle = BorderStyle.FixedSingle;
         portBox.TextAlign = HorizontalAlignment.Center;
         portBox.MaxLength = 5;
-        portBox.Bounds = new Rectangle(60, 8, 118, 32);
-        portBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        portBox.Bounds = new Rectangle(66, 6, 120, 30);
+        portBox.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         portBox.Validating += PortBoxValidating;
         portBox.Validated += PortBoxValidated;
         portPanel.Controls.Add(portBox);
@@ -2646,6 +2779,26 @@ public sealed class ManagerForm : Form
         header.Controls.Add(portPanel, 1, 0);
 
         return header;
+    }
+
+    /// <summary>
+    /// A card with room around it for its shadow. The margin is what the shadow is drawn
+    /// into: a card that filled its cell would have the shadow clipped at the cell edge and
+    /// the depth would disappear.
+    /// </summary>
+    private static UiCardPanel NewCard()
+    {
+        var card = new UiCardPanel();
+        card.Dock = DockStyle.Fill;
+        card.Margin = new Padding(
+            UiStyle.ShadowSpread,
+            0,
+            UiStyle.ShadowSpread,
+            UiStyle.CardGap);
+        // The shadow is drawn outward from the card's edge, so the cell must be wider than
+        // the card by half the spread on each side for it to be visible at all.
+        card.Padding = new Padding(0);
+        return card;
     }
 
     /// <summary>
@@ -2707,7 +2860,7 @@ public sealed class ManagerForm : Form
         captionLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         field.Controls.Add(captionLabel);
 
-        value.Bounds = new Rectangle(0, captionHeight + 8, 400, valueHeight);
+        value.Bounds = new Rectangle(0, captionHeight + 4, 400, valueHeight);
         value.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         field.Controls.Add(value);
 
@@ -2727,16 +2880,15 @@ public sealed class ManagerForm : Form
     /// </summary>
     private Control BuildInfoCard()
     {
-        var card = new UiCardPanel();
-        card.Dock = DockStyle.Fill;
+        var card = NewCard();
 
         var inside = new TableLayoutPanel();
         inside.Dock = DockStyle.Fill;
-        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.Padding = new Padding(UiStyle.CardPadding, 16, UiStyle.CardPadding, 16);
         inside.ColumnCount = 1;
         inside.RowCount = 2;
         inside.BackColor = UiStyle.CardBackground;
-        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         inside.Controls.Add(BuildCardTitle("运行信息"), 0, 0);
 
@@ -2783,12 +2935,11 @@ public sealed class ManagerForm : Form
     /// </summary>
     private Control BuildActionCard()
     {
-        var card = new UiCardPanel();
-        card.Dock = DockStyle.Fill;
+        var card = NewCard();
 
         var inside = new TableLayoutPanel();
         inside.Dock = DockStyle.Fill;
-        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.Padding = new Padding(UiStyle.CardPadding, 16, UiStyle.CardPadding, 16);
         inside.ColumnCount = 1;
         inside.RowCount = 2;
         inside.BackColor = UiStyle.CardBackground;
@@ -2858,12 +3009,11 @@ public sealed class ManagerForm : Form
     /// </summary>
     private Control BuildLogCard()
     {
-        var card = new UiCardPanel();
-        card.Dock = DockStyle.Fill;
+        var card = NewCard();
 
         var inside = new TableLayoutPanel();
         inside.Dock = DockStyle.Fill;
-        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.Padding = new Padding(UiStyle.CardPadding, 16, UiStyle.CardPadding, 16);
         inside.ColumnCount = 1;
         inside.RowCount = 3;
         inside.BackColor = UiStyle.CardBackground;
@@ -3675,10 +3825,14 @@ public sealed class ManagerForm : Form
             logBox.SelectionStart = logBox.TextLength;
             logBox.SelectionLength = 0;
             logBox.SelectionColor = LogColor(formatted.Kind);
-            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + formatted.Text + Environment.NewLine);
+            // A fixed-width time column rather than a tab stop: the log font is
+            // monospaced, and padding is the one alignment a RichTextBox keeps.
+            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss").PadRight(8) + "  " + formatted.Text + Environment.NewLine);
         }
         logBox.SelectionColor = logBox.ForeColor;
         logBox.ScrollToCaret();
+        // The log region grows with its content, so the window has to follow.
+        FitWindowToContent();
     }
 
     private static Color LogColor(LogMessageKind kind)
