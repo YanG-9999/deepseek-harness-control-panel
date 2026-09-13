@@ -1075,19 +1075,23 @@ public static class UiShapes
 public static class UiBackground
 {
     /// <summary>
-    /// Fills <paramref name="bounds"/> with the page gradient, doing nothing when there is
-    /// no area to fill. Callers pass the raw client rectangle, which is empty whenever the
+    /// Fills <paramref name="bounds"/> with the page colour, doing nothing when there is no
+    /// area to fill. Callers pass the raw client rectangle, which is empty whenever the
     /// window is minimized or still has no size.
+    ///
+    /// This was a gradient, and the gradient was the panel's slowest operation by two
+    /// orders of magnitude: measured on the machine this was written for, filling the
+    /// window with a gradient took ~45 ms where a solid fill takes under 1 ms (the same
+    /// measurement against the screen returned 495 ms versus 0.6 ms). The page is repainted
+    /// once for every transparent container, about fifteen times per frame, so the gradient
+    /// alone accounted for most of a second of startup. The two colours it interpolated
+    /// were two points apart in a near-white blue, so nothing is visible for the trade.
     /// </summary>
     public static void Paint(Graphics graphics, Rectangle bounds)
     {
         if (graphics == null || bounds.Width <= 0 || bounds.Height <= 0)
             return;
-        using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
-            bounds,
-            UiStyle.WindowBackground,
-            UiStyle.WindowBackgroundBottom,
-            System.Drawing.Drawing2D.LinearGradientMode.Vertical))
+        using (var brush = new SolidBrush(UiStyle.WindowBackground))
             graphics.FillRectangle(brush, bounds);
     }
 }
@@ -2004,7 +2008,6 @@ public static class UiStyle
     // Three levels of surface, which is what keeps a card-based screen from reading as one
     // flat white sheet: the page sits behind, cards sit on it, and fields sit inside them.
     public static readonly Color WindowBackground = Color.FromArgb(0xF2, 0xF7, 0xFF);
-    public static readonly Color WindowBackgroundBottom = Color.FromArgb(0xEC, 0xF4, 0xFF);
     public static readonly Color CardBackground = Color.White;
     public static readonly Color CardBorder = Color.FromArgb(0xE6, 0xEE, 0xFA);
     public static readonly Color FieldBackground = Color.FromArgb(0xF8, 0xFB, 0xFF);
@@ -3079,9 +3082,9 @@ public sealed class ManagerForm : Form
 
         BuildTrayIcon();
 
-        // Start invisible and let Reveal() put the window on screen once its first frame
-        // is finished. See Reveal() for what the window looked like without this.
+        // Start invisible; RevealWhenIdle puts it on screen once every control has painted.
         Opacity = 0;
+        Application.Idle += RevealWhenIdle;
 
     }
 
@@ -3311,8 +3314,6 @@ public sealed class ManagerForm : Form
     private void ShowFromTray()
     {
         Show();
-        // Opening from the tray is another way to become visible without the Shown event
-        // that normally reveals the window, so make sure it cannot stay transparent.
         Reveal();
         ShowInTaskbar = true;
         WindowState = FormWindowState.Normal;
@@ -3348,7 +3349,6 @@ public sealed class ManagerForm : Form
     private void OnShown(object sender, EventArgs e)
     {
         Shown -= OnShown;
-        Reveal();
         if (!IsInstalled())
             return;
         Task.Run(delegate { return AutoCheckForUpdatesAsync(); });
@@ -3426,29 +3426,46 @@ public sealed class ManagerForm : Form
     {
         // ClientRectangle is empty while the window is minimized, and the erase message
         // still arrives: the guard lives in UiBackground.Paint.
+        paintedOnce = true;
         UiBackground.Paint(e.Graphics, ClientRectangle);
     }
 
     private bool revealed;
+    private bool paintedOnce;
 
     /// <summary>
-    /// Makes the window visible once it has something to show.
+    /// Puts the window on screen once it has something to show.
     ///
-    /// The window starts fully transparent. Windows shows a window the moment it is shown
-    /// and lets it paint afterwards, and this one needs several hundred milliseconds to
-    /// draw ~40 custom controls, so without this the user watches a half-built panel: the
-    /// desktop, then a window with only its background, then the controls arriving one
-    /// area at a time. Measured here, the first frame is not finished until Shown fires.
-    /// Revealing then shows one finished frame; setting Opacity back to 1 also drops the
-    /// layered style, so the text goes back on the normal ClearType path.
+    /// Windows makes a window visible the moment it is shown and lets it paint afterwards,
+    /// which is why the panel used to open as a half-built frame: the desktop, then a
+    /// window with only its background, then the controls arriving area by area.
+    ///
+    /// The trigger is the first idle moment after the first paint: an empty message queue
+    /// means every control has finished drawing. Neither of the obvious alternatives works.
+    /// The form's Shown event arrives before the log area has painted, and a Windows timer
+    /// is starved for as long as paint messages keep coming, which on the machine this was
+    /// written for meant it never fired at all.
+    /// </summary>
+    private void RevealWhenIdle(object sender, EventArgs e)
+    {
+        if (!paintedOnce || !Visible)
+            return;
+        Reveal();
+    }
+
+    /// <summary>
+    /// Ends the invisible start. Opening from the tray also calls this: a panel that was
+    /// never revealed must not stay transparent when the user asks to see it.
     /// </summary>
     private void Reveal()
     {
         if (revealed)
             return;
         revealed = true;
+        Application.Idle -= RevealWhenIdle;
         Opacity = 1;
     }
+
 
     /// <summary>
     /// Brand mark, product name, tagline, and the read-only port.

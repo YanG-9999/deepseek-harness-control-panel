@@ -36,8 +36,10 @@ public static class UiBackgroundTests
     }
 
     /// <summary>
-    /// The guard must not have turned the background into a no-op: a normal window still
-    /// gets the vertical page gradient.
+    /// The guard must not have turned the background into a no-op, and the page has to be
+    /// the colour the style declares. It used to be a vertical gradient, and that gradient
+    /// turned out to be the panel's slowest operation by two orders of magnitude - see
+    /// UiBackground.Paint - so the flat colour is deliberate, not an oversight.
     /// </summary>
     private static void VerifyNormalRectangleStillPaints()
     {
@@ -46,12 +48,16 @@ public static class UiBackgroundTests
             using (Graphics graphics = Graphics.FromImage(bitmap))
                 UiBackground.Paint(graphics, new Rectangle(0, 0, 16, 16));
 
-            Color top = bitmap.GetPixel(8, 0);
-            Color bottom = bitmap.GetPixel(8, 15);
-            if (top.A != 255)
-                throw new InvalidOperationException("The page background must be filled, got alpha " + top.A + ".");
-            if (top.R == bottom.R && top.G == bottom.G && top.B == bottom.B)
-                throw new InvalidOperationException("The page background must keep its vertical gradient.");
+            foreach (Point point in new[] { new Point(0, 0), new Point(8, 8), new Point(15, 15) })
+            {
+                Color pixel = bitmap.GetPixel(point.X, point.Y);
+                if (pixel.A != 255)
+                    throw new InvalidOperationException(
+                        "The page background must be filled, got alpha " + pixel.A + " at " + point + ".");
+                if (pixel.ToArgb() != UiStyle.WindowBackground.ToArgb())
+                    throw new InvalidOperationException(
+                        "The page background must be the page colour, got " + pixel + " at " + point + ".");
+            }
         }
     }
 
