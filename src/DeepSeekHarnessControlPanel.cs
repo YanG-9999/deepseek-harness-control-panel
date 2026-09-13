@@ -967,6 +967,130 @@ public static class SingleInstancePolicy
 }
 
 /// <summary>
+/// The startup registration that makes the panel launch with Windows.
+///
+/// It lives under HKCU rather than HKLM on purpose: a machine-wide entry would need
+/// administrator rights, and this panel deliberately installs per-user without ever
+/// requesting elevation. The entry is opt-in and never written unless the user asks.
+/// </summary>
+public static class AutoStartPolicy
+{
+    public const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    /// <summary>Value name under the Run key. Stable, so disabling can find it again.</summary>
+    public const string ValueName = "DeepSeekHarnessControlPanel";
+
+    /// <summary>
+    /// The command Windows should run. Quoted because the executable can live under a
+    /// path with spaces, and suffixed so the panel starts hidden in the tray.
+    /// </summary>
+    public const string TrayArgument = "--tray";
+
+    public static string BuildCommand(string executablePath)
+    {
+        if (String.IsNullOrWhiteSpace(executablePath))
+            throw new InvalidOperationException("可执行文件路径为空，无法设置开机自启。");
+        return "\"" + executablePath + "\" " + TrayArgument;
+    }
+
+    /// <summary>
+    /// Whether the argument list requests a tray start.
+    /// </summary>
+    public static bool IsTrayStart(string[] arguments)
+    {
+        if (arguments == null)
+            return false;
+        foreach (string argument in arguments)
+        {
+            if (String.Equals(argument, TrayArgument, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether a stored command already matches what we would write. Used to avoid
+    /// rewriting the key on every launch, which would be pointless registry churn.
+    /// </summary>
+    public static bool Matches(string storedCommand, string executablePath)
+    {
+        if (String.IsNullOrWhiteSpace(storedCommand) || String.IsNullOrWhiteSpace(executablePath))
+            return false;
+        return String.Equals(
+            storedCommand.Trim(),
+            BuildCommand(executablePath).Trim(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+public enum TrayCloseAction
+{
+    /// <summary>Keep running in the tray; the service should stay available.</summary>
+    MinimizeToTray,
+    /// <summary>Actually exit the panel.</summary>
+    Exit
+}
+
+/// <summary>
+/// What closing the window means once the panel owns a tray icon.
+///
+/// The default is to keep running: a management panel that exits on close makes the
+/// tray icon pointless, and the service it supervises stays up either way. Exiting
+/// remains available from the tray menu and from the close prompt.
+/// </summary>
+public static class TrayClosePolicy
+{
+    public static TrayCloseAction Resolve(bool exitRequestedFromTray)
+    {
+        return exitRequestedFromTray ? TrayCloseAction.Exit : TrayCloseAction.MinimizeToTray;
+    }
+
+    /// <summary>
+    /// Whether the close prompt should be shown. Asking every single time is noise, so
+    /// the user's answer is remembered and the prompt is skipped afterwards.
+    /// </summary>
+    public static bool ShouldAskOnClose(bool alreadyAnswered)
+    {
+        return !alreadyAnswered;
+    }
+
+    /// <summary>
+    /// The close prompt. It names what keeps running, because "close" no longer means
+    /// the service stops.
+    /// </summary>
+    public static string BuildClosePrompt(int port)
+    {
+        return "关闭窗口后控制面板会继续在托盘运行，Harness 服务不受影响。" + Environment.NewLine + Environment.NewLine +
+            "· 点“最小化到托盘”：面板留在托盘，可随时从托盘图标打开。" + Environment.NewLine +
+            "· 点“退出”：完全关闭控制面板（Harness 若在运行会继续运行）。" + Environment.NewLine + Environment.NewLine +
+            "Harness 当前监听端口：" + port + "。";
+    }
+
+    /// <summary>
+    /// The tray menu labels. Kept together so the menu and its tests agree.
+    /// </summary>
+    public const string MenuShow = "打开控制面板";
+    public const string MenuOpenPage = "打开 Harness 页面";
+    public const string MenuStart = "启动 Harness";
+    public const string MenuStop = "停止 Harness";
+    public const string MenuAutoStart = "开机自动启动";
+    public const string MenuExit = "退出";
+
+    /// <summary>
+    /// The hover tooltip. Carries the live state so the tray is informative without
+    /// opening the window.
+    /// </summary>
+    public static string BuildTooltip(bool running, int port, string version)
+    {
+        string state = running ? "正在运行" : "未运行";
+        string suffix = String.IsNullOrWhiteSpace(version) ? "" : "  " + version;
+        string text = "DeepSeek Harness 控制面板 — " + state + "（端口 " + port + "）" + suffix;
+        // NotifyIcon truncates beyond 63 characters, so keep it inside that budget.
+        return text.Length <= 63 ? text : text.Substring(0, 60) + "...";
+    }
+}
+
+/// <summary>
 /// The port Harness listens on. It used to be the literal 3080 in sixteen places,
 /// which meant changing it required editing every message, probe, and URL as well.
 /// </summary>
@@ -1613,6 +1737,26 @@ public sealed class ManagerForm : Form
     /// marshal the tick onto a pool thread instead of the UI thread.
     /// </summary>
     private readonly System.Windows.Forms.Timer stateTimer = new System.Windows.Forms.Timer();
+
+    /// <summary>
+    /// Keeps the panel reachable while its window is closed. Created in the constructor
+    /// because the close behaviour depends on it existing.
+    /// </summary>
+    private readonly NotifyIcon trayIcon = new NotifyIcon();
+
+    /// <summary>Whether the user asked to exit, as opposed to closing the window.</summary>
+    private bool exitRequested;
+
+    /// <summary>Set once the close prompt has been answered, so it is not repeated.</summary>
+    private bool closePromptAnswered;
+
+    private readonly CheckBox autoStartCheck = new CheckBox();
+
+    /// <summary>
+    /// Whether this launch should stay in the tray. Set when Windows starts the panel
+    /// at logon, so the window does not appear unbidden.
+    /// </summary>
+    private readonly bool startHiddenInTray;
     private Process server;
     private List<string> discoveredRoots = new List<string>();
     private string selectedNodeDirectory = "";
@@ -1632,7 +1776,18 @@ public sealed class ManagerForm : Form
     private bool nodeTransportRequired;
 
     public ManagerForm()
+        : this(false)
     {
+    }
+
+    /// <summary>
+    /// <paramref name="startHidden"/> is set when Windows launched the panel at logon,
+    /// so it waits in the tray instead of opening a window over whatever the user is
+    /// doing.
+    /// </summary>
+    public ManagerForm(bool startHidden)
+    {
+        startHiddenInTray = startHidden;
         Text = "DeepSeek Harness 控制面板";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Width = 760;
@@ -1663,7 +1818,206 @@ public sealed class ManagerForm : Form
         stateTimer.Tick += delegate { PollState(); };
         stateTimer.Start();
         FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
+
+        BuildTrayIcon();
+        LoadAutoStartState();
+
+        // A tray start means Windows launched us at logon; the window should stay out
+        // of the way until it is asked for.
+        if (startHiddenInTray)
+            BeginInvoke((Action)delegate { HideToTray(); });
     }
+
+    /// <summary>
+    /// Creates the tray icon and its menu. Built once; the menu items read live state
+    /// when opened rather than being rebuilt on every poll.
+    /// </summary>
+    private void BuildTrayIcon()
+    {
+        try
+        {
+            trayIcon.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        }
+        catch (Exception)
+        {
+            // A missing icon must not stop the panel from having a tray presence.
+        }
+        trayIcon.Text = TrayClosePolicy.BuildTooltip(false, Port, "");
+        trayIcon.Visible = true;
+        trayIcon.DoubleClick += delegate { ShowFromTray(); };
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(TrayClosePolicy.MenuShow, null, delegate { ShowFromTray(); });
+        menu.Items.Add(TrayClosePolicy.MenuOpenPage, null, delegate { OpenClick(null, EventArgs.Empty); });
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(TrayClosePolicy.MenuStart, null, delegate { StartClick(null, EventArgs.Empty); });
+        menu.Items.Add(TrayClosePolicy.MenuStop, null, delegate { StopClick(null, EventArgs.Empty); });
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(TrayClosePolicy.MenuExit, null, delegate { ExitFromTray(); });
+        trayIcon.ContextMenuStrip = menu;
+
+        FormClosing += OnFormClosing;
+    }
+
+    /// <summary>
+    /// Closing the window keeps the panel running in the tray unless the user chose to
+    /// exit. The prompt explains that, and its answer is remembered after the first time.
+    /// </summary>
+    private void OnFormClosing(object sender, FormClosingEventArgs e)
+    {
+        if (exitRequested || e.CloseReason == CloseReason.WindowsShutDown)
+            return;
+
+        if (TrayClosePolicy.ShouldAskOnClose(closePromptAnswered))
+        {
+            DialogResult answer = MessageBox.Show(
+                this,
+                TrayClosePolicy.BuildClosePrompt(Port),
+                "关闭控制面板",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            closePromptAnswered = true;
+            if (answer == DialogResult.Yes)
+            {
+                ExitFromTray();
+                return;
+            }
+        }
+
+        if (TrayClosePolicy.Resolve(false) == TrayCloseAction.MinimizeToTray)
+        {
+            e.Cancel = true;
+            HideToTray();
+        }
+    }
+
+    /// <summary>Hides the window and says so, so the panel is not simply "missing".</summary>
+    private void HideToTray()
+    {
+        Hide();
+        ShowInTaskbar = false;
+        Log("已最小化到托盘。双击托盘图标可重新打开。");
+    }
+
+    private void ShowFromTray()
+    {
+        Show();
+        ShowInTaskbar = true;
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    /// <summary>
+    /// Real exit. Warns when an operation is in flight, because exiting mid-build would
+    /// orphan the child process the cancellation logic exists to stop.
+    /// </summary>
+    private void ExitFromTray()
+    {
+        if (busy)
+        {
+            DialogResult answer = MessageBox.Show(
+                this,
+                "当前有操作正在进行。退出会中断它，并可能留下未完成的安装。" + Environment.NewLine + Environment.NewLine +
+                "建议先点击“取消”等待操作停止。仍要退出吗？",
+                "DeepSeek Harness",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes)
+                return;
+            CancelOperation();
+        }
+
+        exitRequested = true;
+        trayIcon.Visible = false;
+        Close();
+    }
+
+    /// <summary>
+    /// Reads the current auto-start registration. The checkbox reflects Windows rather
+    /// than a stored preference, so it cannot claim a state the system does not have.
+    /// </summary>
+    private void LoadAutoStartState()
+    {
+        bool enabled = false;
+        try
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(AutoStartPolicy.RunKeyPath))
+            {
+                if (key != null)
+                    enabled = key.GetValue(AutoStartPolicy.ValueName) != null;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("读取开机自启设置失败: " + ex.Message);
+        }
+
+        // Assigning Checked fires the handler; suppress the write it would perform.
+        suppressAutoStartWrite = true;
+        autoStartCheck.Checked = enabled;
+        suppressAutoStartWrite = false;
+    }
+
+    /// <summary>Whether the checkbox handler should skip writing, used during load.</summary>
+    private bool suppressAutoStartWrite;
+
+    private void AutoStartCheckChanged(object sender, EventArgs e)
+    {
+        if (suppressAutoStartWrite)
+            return;
+        ApplyAutoStart(autoStartCheck.Checked);
+    }
+
+    /// <summary>
+    /// Writes or removes the HKCU Run entry. Nothing here needs administrator rights,
+    /// which is the whole reason the entry is per-user.
+    /// </summary>
+    private void ApplyAutoStart(bool enabled)
+    {
+        try
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(AutoStartPolicy.RunKeyPath))
+            {
+                if (key == null)
+                    throw new InvalidOperationException("无法打开注册表启动项。");
+
+                if (enabled)
+                {
+                    string command = AutoStartPolicy.BuildCommand(Application.ExecutablePath);
+                    key.SetValue(AutoStartPolicy.ValueName, command, RegistryValueKind.String);
+                    Log("已设置开机自动启动：" + command);
+                }
+                else
+                {
+                    key.DeleteValue(AutoStartPolicy.ValueName, false);
+                    Log("已取消开机自动启动。");
+                }
+            }
+            SaveSetting("autoStart", enabled ? "true" : "false");
+
+            // Keep the control in step with what actually happened. Without this the
+            // success path left the checkbox and the registry entry able to disagree,
+            // for example when this is reached from somewhere other than the checkbox.
+            suppressAutoStartWrite = true;
+            autoStartCheck.Checked = enabled;
+            suppressAutoStartWrite = false;
+        }
+        catch (Exception ex)
+        {
+            Log("设置开机自启失败: " + ex.Message);
+            MessageBox.Show(
+                this,
+                "无法修改开机自启设置：" + Environment.NewLine + ex.Message,
+                "DeepSeek Harness",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            // Put the checkbox back so it never shows a state that was not applied.
+            suppressAutoStartWrite = true;
+            autoStartCheck.Checked = !enabled;
+            suppressAutoStartWrite = false;
+        }
+    }
+
 
     private void OnShown(object sender, EventArgs e)
     {
@@ -1789,13 +2143,20 @@ public sealed class ManagerForm : Form
 
         var infoPanel = new TableLayoutPanel();
         infoPanel.Dock = DockStyle.Fill;
-        infoPanel.ColumnCount = 2;
+        infoPanel.ColumnCount = 3;
         infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         infoPanel.Controls.Add(new Label { Text = "Harness 版本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         versionLabel.Dock = DockStyle.Fill;
         versionLabel.TextAlign = ContentAlignment.MiddleLeft;
         infoPanel.Controls.Add(versionLabel, 1, 0);
+        // The auto-start switch lives on this row, which had spare width.
+        autoStartCheck.Text = TrayClosePolicy.MenuAutoStart;
+        autoStartCheck.Dock = DockStyle.Fill;
+        autoStartCheck.TextAlign = ContentAlignment.MiddleLeft;
+        autoStartCheck.CheckedChanged += AutoStartCheckChanged;
+        infoPanel.Controls.Add(autoStartCheck, 2, 0);
         main.Controls.Add(infoPanel, 0, 3);
 
         var buttons = new FlowLayoutPanel();
@@ -2582,6 +2943,17 @@ public sealed class ManagerForm : Form
         runningLabel.Text = snapshot.RunningText;
         // The version is only meaningful for a single resolved install.
         versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls ? snapshot.Version : "";
+
+        // The tray tooltip is the only state information visible while the window is
+        // hidden, so it tracks the same snapshot.
+        try
+        {
+            trayIcon.Text = TrayClosePolicy.BuildTooltip(snapshot.Running, Port, snapshot.Version);
+        }
+        catch (Exception)
+        {
+            // A tooltip longer than the platform limit throws; the panel must survive it.
+        }
     }
 
     /// <summary>
@@ -4623,12 +4995,14 @@ public static class Program
     private const string MutexName = @"Local\DeepSeekHarnessControlPanel.SingleInstance";
 
     [STAThread]
-    public static void Main()
+    public static void Main(string[] arguments)
     {
         // Install the safety net first: every later feature runs inside a panel that
         // must never disappear silently.
         Application.ThreadException += OnThreadException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+
+        bool startHidden = AutoStartPolicy.IsTrayStart(arguments);
 
         bool createdNew;
         using (var instanceGate = new Mutex(true, MutexName, out createdNew))
@@ -4641,7 +5015,7 @@ public static class Program
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new ManagerForm());
+            Application.Run(new ManagerForm(startHidden));
         }
     }
 

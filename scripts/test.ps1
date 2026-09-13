@@ -31,7 +31,8 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\HarnessStatusChangePolicyTests.cs'),
     (Join-Path $projectRoot 'tests\OperationCancellationPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\LogSearchPolicyTests.cs'),
-    (Join-Path $projectRoot 'tests\HarnessPortPolicyTests.cs')
+    (Join-Path $projectRoot 'tests\HarnessPortPolicyTests.cs'),
+    (Join-Path $projectRoot 'tests\AutoStartAndTrayPolicyTests.cs')
 )
 $testOutput = Join-Path $OutputDirectory 'StopTargetResolverTests.exe'
 
