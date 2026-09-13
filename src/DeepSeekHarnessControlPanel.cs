@@ -7,6 +7,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -715,6 +716,87 @@ public static class StateSecretProtection
             return "";
         }
     }
+}
+
+/// <summary>
+/// The handful of Win32 calls the panel needs: enumerating top-level windows to find
+/// its own already-running instance, and rendering a window for diagnostics.
+/// </summary>
+public static class NativeMethods
+{
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    public const int SW_RESTORE = 9;
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder buffer, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder buffer, int maxCount);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+
+/// <summary>
+/// Single-instance rules. Two panels would otherwise drive the same port and
+/// overwrite each other's .dsh-manager-state.json, so the second launch must hand
+/// control back to the first instead of starting a rival.
+/// </summary>
+public static class SingleInstancePolicy
+{
+    /// <summary>
+    /// The class name WinForms assigns every window in this process, which is how a
+    /// second launch recognises the first one's window without any IPC channel.
+    /// </summary>
+    public static bool IsPanelWindowClass(string className)
+    {
+        return !String.IsNullOrEmpty(className) &&
+            className.StartsWith("WindowsForms10.Window.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether a discovered window is the panel's main window: right process, right
+    /// class, right title, and big enough to be the real window rather than a hidden
+    /// helper such as the .NET broadcast window.
+    /// </summary>
+    public static bool IsMainPanelWindow(string className, string title, int width, int height)
+    {
+        if (!IsPanelWindowClass(className))
+            return false;
+        if (String.IsNullOrEmpty(title) || !title.StartsWith("DeepSeek Harness 控制面板", StringComparison.Ordinal))
+            return false;
+        return width > 400 && height > 300;
+    }
+
+    /// <summary>
+    /// Shown when a second launch finds the first one already running.
+    /// </summary>
+    public const string AlreadyRunningMessage =
+        "DeepSeek Harness 控制面板已经在运行。\r\n\r\n" +
+        "同一个面板不能重复启动：两个实例会同时管理 3080 端口和安装状态，导致状态彼此覆盖。\r\n" +
+        "已为你切换到正在运行的窗口。";
 }
 
 /// <summary>
@@ -3154,6 +3236,12 @@ public static class Program
     /// </summary>
     private static bool terminating;
 
+    /// <summary>
+    /// Process-wide single-instance gate. Held for the life of the process; the
+    /// "Local\" prefix scopes it to the session so a second user can still run one.
+    /// </summary>
+    private const string MutexName = @"Local\DeepSeekHarnessControlPanel.SingleInstance";
+
     [STAThread]
     public static void Main()
     {
@@ -3162,9 +3250,92 @@ public static class Program
         Application.ThreadException += OnThreadException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
 
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new ManagerForm());
+        bool createdNew;
+        using (var instanceGate = new Mutex(true, MutexName, out createdNew))
+        {
+            if (!createdNew)
+            {
+                ActivateRunningInstance();
+                return;
+            }
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new ManagerForm());
+        }
+    }
+
+    /// <summary>
+    /// Brings an already-running panel to the front, then tells the user why this
+    /// launch did not open a second window.
+    /// </summary>
+    private static void ActivateRunningInstance()
+    {
+        bool focused = TryFocusExistingPanel();
+        MessageBox.Show(
+            SingleInstancePolicy.AlreadyRunningMessage,
+            "DeepSeek Harness 控制面板",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        if (!focused)
+        {
+            // Nothing more to do, but never fail silently about it.
+            WriteReport(
+                Path.GetTempPath(),
+                "单实例激活",
+                new InvalidOperationException("未找到正在运行的控制面板窗口，无法自动切换。"));
+        }
+    }
+
+    /// <summary>
+    /// Finds the other instance's main window by class and title, then restores and
+    /// focuses it. Uses the window enumeration API because the two processes share no
+    /// IPC channel.
+    /// </summary>
+    private static bool TryFocusExistingPanel()
+    {
+        IntPtr found = IntPtr.Zero;
+        try
+        {
+            NativeMethods.EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+            {
+                var className = new StringBuilder(256);
+                NativeMethods.GetClassName(hWnd, className, className.Capacity);
+                var title = new StringBuilder(512);
+                NativeMethods.GetWindowText(hWnd, title, title.Capacity);
+
+                NativeMethods.RECT rect;
+                NativeMethods.GetWindowRect(hWnd, out rect);
+                if (!SingleInstancePolicy.IsMainPanelWindow(
+                        className.ToString(),
+                        title.ToString(),
+                        rect.Right - rect.Left,
+                        rect.Bottom - rect.Top))
+                    return true;
+
+                found = hWnd;
+                return false;
+            }, IntPtr.Zero);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+
+        if (found == IntPtr.Zero)
+            return false;
+
+        try
+        {
+            if (NativeMethods.IsIconic(found))
+                NativeMethods.ShowWindow(found, NativeMethods.SW_RESTORE);
+            NativeMethods.SetForegroundWindow(found);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>Unhandled exception on the UI thread.</summary>

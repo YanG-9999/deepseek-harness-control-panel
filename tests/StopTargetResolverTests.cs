@@ -58,6 +58,7 @@ public static class StopTargetResolverTests
         NodeNetworkPolicyTests.Run();
         UnexpectedErrorReportTests.Run();
         HarnessUpdatePolicyTests.Run();
+        SingleInstancePolicyTests.Run();
 
         AssertResolution(
             StopTargetKind.None,
