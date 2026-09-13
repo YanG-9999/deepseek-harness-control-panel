@@ -16,7 +16,52 @@ public static class ControlPanelLayoutTests
                 throw new InvalidOperationException("Button panel must not show scrollbars.");
             if (buttons.Controls.Count != 9)
                 throw new InvalidOperationException("Expected 9 action buttons, got " + buttons.Controls.Count + ".");
+
+            VerifyBrowseButtonExists(form);
         }
+    }
+
+    /// <summary>
+    /// The install-directory row previously had no picker: the handler existed but
+    /// nothing was wired to it, so the only way to choose a directory was through the
+    /// install flow. This asserts the control exists, is laid out, and sits where it
+    /// belongs.
+    ///
+    /// On-screen visibility is deliberately not asserted here: Control.Visible is
+    /// inherited, and this test never shows the form, so every control (including the
+    /// form) reports false. Reachability is confirmed by driving the real window.
+    /// </summary>
+    private static void VerifyBrowseButtonExists(Control form)
+    {
+        Button browse = FindButtonByText(form, "浏览");
+        if (browse == null)
+            throw new InvalidOperationException("The install-directory row needs a reachable browse button.");
+        if (browse.Width <= 0 || browse.Height <= 0)
+            throw new InvalidOperationException(
+                "The browse button must be laid out with a usable size, got " + browse.Size + ".");
+
+        // It must sit on the install-directory row, not in the action button panel.
+        TableLayoutPanel row = browse.Parent as TableLayoutPanel;
+        if (row == null)
+            throw new InvalidOperationException("The browse button must live in the install-directory row.");
+        if (row.Controls.Count != 3)
+            throw new InvalidOperationException("The install-directory row must hold a label, the path, and the browse button.");
+        if (browse.Dock != DockStyle.Fill)
+            throw new InvalidOperationException("The browse button must fill its column, not auto-size past it.");
+    }
+
+    private static Button FindButtonByText(Control parent, string text)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            var button = child as Button;
+            if (button != null && String.Equals(button.Text, text, StringComparison.Ordinal))
+                return button;
+            Button nested = FindButtonByText(child, text);
+            if (nested != null)
+                return nested;
+        }
+        return null;
     }
 
     private static FlowLayoutPanel FindFlowLayout(Control parent)

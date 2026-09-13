@@ -133,9 +133,96 @@ public static class LogLineFormatter
     }
 }
 
-public static class HarnessInstallationValidator
+/// <summary>
+/// Formats an unexpected exception into a report the user can act on. Kept free of
+/// dialogs and file IO so the text is unit-testable, and so the crash path itself
+/// cannot throw.
+/// </summary>
+public static class UnexpectedErrorReport
 {
-    public static readonly string[] RequiredFiles = new[]
+    /// <summary>
+    /// Renders the type, message, stack, and inner-exception chain.
+    ///
+    /// Every field is read defensively: a stack overflow or an out-of-memory fault
+    /// can make <c>Message</c> or <c>StackTrace</c> throw, and an exception handler
+    /// that throws while reporting a crash loses the original fault entirely.
+    /// </summary>
+    public static string Format(string source, Exception error)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("控制面板遇到未预期的错误。");
+        builder.AppendLine();
+        builder.AppendLine("位置: " + SafeText(source));
+        if (error == null)
+        {
+            builder.AppendLine("异常: (无)");
+            return builder.ToString();
+        }
+
+        int depth = 0;
+        for (Exception current = error; current != null; current = current.InnerException)
+        {
+            string prefix = depth == 0 ? "异常" : "  内部异常 " + depth;
+            builder.AppendLine(prefix + ": " + SafeTypeName(current));
+            builder.AppendLine("  消息: " + SafeText(SafeMessage(current)));
+            string stack = SafeText(SafeStackTrace(current));
+            if (!String.IsNullOrEmpty(stack))
+                builder.AppendLine("  堆栈: " + stack);
+            depth++;
+            if (depth > 8)
+            {
+                builder.AppendLine("  (内部异常链过长，已截断)");
+                break;
+            }
+        }
+        return builder.ToString();
+    }
+
+    private static string SafeTypeName(Exception error)
+    {
+        try
+        {
+            return error.GetType().FullName;
+        }
+        catch (Exception)
+        {
+            return "(无法读取异常类型)";
+        }
+    }
+
+    private static string SafeMessage(Exception error)
+    {
+        try
+        {
+            return error.Message;
+        }
+        catch (Exception)
+        {
+            // A corrupted exception can throw from ToString() and from Message.
+            return "(无法读取异常消息)";
+        }
+    }
+
+    private static string SafeStackTrace(Exception error)
+    {
+        try
+        {
+            return error.StackTrace;
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
+
+    private static string SafeText(string value)
+    {
+        return value ?? "";
+    }
+}
+
+public static class HarnessInstallationValidator
+{    public static readonly string[] RequiredFiles = new[]
     {
         "package.json",
         "pnpm-workspace.yaml",
@@ -744,6 +831,7 @@ public sealed class ManagerForm : Form
     private readonly Button rescanButton = new Button();
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
+    private readonly Button browseButton = new Button();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -798,15 +886,21 @@ public sealed class ManagerForm : Form
 
         var pathPanel = new TableLayoutPanel();
         pathPanel.Dock = DockStyle.Fill;
-        pathPanel.ColumnCount = 2;
+        pathPanel.ColumnCount = 3;
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
         var pathLabel = new Label { Text = "安装目录", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
         pathBox.Dock = DockStyle.Fill;
         pathBox.TextAlign = ContentAlignment.MiddleLeft;
         pathBox.AutoEllipsis = true;
         pathPanel.Controls.Add(pathLabel, 0, 0);
         pathPanel.Controls.Add(pathBox, 1, 0);
+        AddButton(pathPanel, browseButton, "浏览", BrowseClick);
+        // AddButton sets AutoSize; a filling cell needs the opposite.
+        browseButton.Dock = DockStyle.Fill;
+        browseButton.AutoSize = false;
+        pathPanel.Controls.Add(browseButton, 2, 0);
         main.Controls.Add(pathPanel, 0, 0);
 
         var statePanel = new TableLayoutPanel();
@@ -1113,6 +1207,8 @@ public sealed class ManagerForm : Form
         rescanButton.Enabled = enabled;
         openFolderButton.Enabled = enabled && Directory.Exists(Root);
         uninstallButton.Enabled = enabled && installed && !multiple;
+        // Choosing a directory only matters before an install locks it in.
+        browseButton.Enabled = enabled && !installed && !multiple;
     }
 
     private void Log(string message)
@@ -2942,11 +3038,94 @@ public sealed class ManagerForm : Form
 /// </summary>
 public static class Program
 {
+    /// <summary>Guards against a cascade of dialogs when faults repeat.</summary>
+    private static int reported;
+
+    /// <summary>
+    /// Set once the CLR has announced a terminating fault. A modal dialog during
+    /// shutdown can hang the process, so the second handler only writes a file.
+    /// </summary>
+    private static bool terminating;
+
     [STAThread]
     public static void Main()
     {
+        // Install the safety net first: every later feature runs inside a panel that
+        // must never disappear silently.
+        Application.ThreadException += OnThreadException;
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new ManagerForm());
     }
+
+    /// <summary>Unhandled exception on the UI thread.</summary>
+    private static void OnThreadException(object sender, System.Threading.ThreadExceptionEventArgs e)
+    {
+        Report("UI 线程（Application.ThreadException）", e == null ? null : e.Exception, true);
+    }
+
+    /// <summary>Unhandled exception on a background thread, which terminates the process.</summary>
+    private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        terminating = true;
+        Report("后台线程（AppDomain.UnhandledException）", e == null ? null : e.ExceptionObject as Exception, true);
+    }
+
+    /// <summary>
+    /// Writes the report next to the executable and, unless the process is already
+    /// terminating, shows it. Returns the path when a log file was written.
+    /// </summary>
+    public static string Report(string source, Exception error, bool showDialog)
+    {
+        string directory = Path.GetDirectoryName(Application.ExecutablePath) ?? ".";
+        string path = WriteReport(directory, source, error);
+
+        if (showDialog && !terminating && System.Threading.Interlocked.Increment(ref reported) <= 3)
+        {
+            try
+            {
+                string report = UnexpectedErrorReport.Format(source, error);
+                MessageBox.Show(
+                    report + (String.IsNullOrEmpty(path) ? "" : Environment.NewLine + "已写入: " + path),
+                    "DeepSeek Harness 控制面板 — 未预期的错误",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (Exception)
+            {
+                // Nothing left to report with.
+            }
+        }
+        return path;
+    }
+
+    /// <summary>
+    /// Appends the report to <c>dsh-control-panel-error.log</c> in
+    /// <paramref name="directory"/>, returning the path or an empty string when the
+    /// write failed. The directory is a parameter so the behaviour is testable.
+    /// </summary>
+    public static string WriteReport(string directory, string source, Exception error)
+    {
+        if (String.IsNullOrWhiteSpace(directory))
+            return "";
+        string path = Path.Combine(directory, ErrorLogFileName);
+        try
+        {
+            File.AppendAllText(
+                path,
+                "===== " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " =====" + Environment.NewLine +
+                UnexpectedErrorReport.Format(source, error) + Environment.NewLine,
+                Encoding.UTF8);
+            return path;
+        }
+        catch (Exception)
+        {
+            // The crash path must not throw.
+            return "";
+        }
+    }
+
+    public const string ErrorLogFileName = "dsh-control-panel-error.log";
 }

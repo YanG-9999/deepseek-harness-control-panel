@@ -56,6 +56,7 @@ public static class StopTargetResolverTests
         HarnessProfileDiagnosticsTests.Run();
         HarnessProcessIdentityPolicyTests.Run();
         NodeNetworkPolicyTests.Run();
+        UnexpectedErrorReportTests.Run();
 
         AssertResolution(
             StopTargetKind.None,
