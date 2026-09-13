@@ -980,6 +980,13 @@ public static class HarnessLifecyclePolicy
     public const int EndpointProbeTimeoutMilliseconds = 3000;
     public const string LocalWebUri = "http://127.0.0.1:3080/";
 
+    /// <summary>
+    /// How often the panel re-checks whether Harness is still running. Three seconds
+    /// is frequent enough to notice an exit promptly and rare enough that the probe
+    /// cost stays irrelevant.
+    /// </summary>
+    public const int StatePollIntervalMilliseconds = 3000;
+
     public static bool IsHarnessDocument(string content)
     {
         return !String.IsNullOrWhiteSpace(content) &&
@@ -1170,6 +1177,16 @@ public sealed class ManagerForm : Form
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
+
+    /// <summary>The last snapshot applied to the UI, used to detect real changes.</summary>
+    private HarnessStatusSnapshot lastSnapshot;
+
+    /// <summary>
+    /// Polls the running state so a stopped Harness is noticed on its own. Fully
+    /// qualified because System.Threading is also imported and its Timer would
+    /// marshal the tick onto a pool thread instead of the UI thread.
+    /// </summary>
+    private readonly System.Windows.Forms.Timer stateTimer = new System.Windows.Forms.Timer();
     private Process server;
     private List<string> discoveredRoots = new List<string>();
     private string selectedNodeDirectory = "";
@@ -1209,6 +1226,13 @@ public sealed class ManagerForm : Form
         // Check for an upstream release once the window is up. Runs after the first
         // paint and never blocks or alerts: a failed check is a normal condition.
         Shown += OnShown;
+
+        // Poll the running state. Without this the panel showed "正在运行" forever
+        // after Harness exited, until the user happened to press something.
+        stateTimer.Interval = HarnessLifecyclePolicy.StatePollIntervalMilliseconds;
+        stateTimer.Tick += delegate { PollState(); };
+        stateTimer.Start();
+        FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
     }
 
     private void OnShown(object sender, EventArgs e)
@@ -1559,14 +1583,15 @@ public sealed class ManagerForm : Form
             }
             busy = true;
         }
-        SetButtons(false);
+        SetButtons(false, lastSnapshot ?? ComputeStatusSnapshot());
         Log(title + "...");
         Task.Run(action).ContinueWith(t =>
         {
             BeginInvoke((Action)delegate
             {
                 busy = false;
-                SetButtons(true);
+                // RefreshState recomputes the snapshot and reapplies the buttons, so
+                // it covers both the enabled and the state side of finishing.
                 if (t.IsFaulted)
                 {
                     string message = t.Exception == null ? "未知错误" : t.Exception.GetBaseException().Message;
@@ -1582,26 +1607,25 @@ public sealed class ManagerForm : Form
         });
     }
 
-    private void SetButtons(bool enabled)
+    /// <summary>
+    /// Applies button availability from an already-computed snapshot. Taking the
+    /// snapshot as a parameter is what removed the duplicate port and process probing
+    /// this method used to repeat on every call.
+    /// </summary>
+    private void SetButtons(bool enabled, HarnessStatusSnapshot snapshot)
     {
-        bool installed = IsInstalled();
-        bool ready = installed && IsInstallationReady();
-        int portPid = FindPortOwner(3080);
-        bool portBusy = IsPortOpen(3080);
-        bool running = portBusy && portPid > 0 && IsLikelyHarnessProcess(portPid);
-        bool multiple = discoveredRoots.Count > 1;
-        installButton.Text = installed && !ready ? "修复安装" : "一键安装";
-        installButton.Enabled = enabled && (!installed || !ready) && !multiple;
-        startButton.Enabled = enabled && ready && !portBusy && !multiple;
-        restartButton.Enabled = enabled && ready && running && !multiple;
-        stopButton.Enabled = enabled && running && !multiple;
-        updateButton.Enabled = enabled && ready && !multiple;
-        openButton.Enabled = enabled && running;
+        installButton.Text = snapshot.Installed && !snapshot.Ready ? "修复安装" : "一键安装";
+        installButton.Enabled = enabled && (!snapshot.Installed || !snapshot.Ready) && !snapshot.MultipleInstalls;
+        startButton.Enabled = enabled && snapshot.Ready && !snapshot.PortBusy && !snapshot.MultipleInstalls;
+        restartButton.Enabled = enabled && snapshot.Ready && snapshot.Running && !snapshot.MultipleInstalls;
+        stopButton.Enabled = enabled && snapshot.Running && !snapshot.MultipleInstalls;
+        updateButton.Enabled = enabled && snapshot.Ready && !snapshot.MultipleInstalls;
+        openButton.Enabled = enabled && snapshot.Running;
         rescanButton.Enabled = enabled;
         openFolderButton.Enabled = enabled && Directory.Exists(Root);
-        uninstallButton.Enabled = enabled && installed && !multiple;
+        uninstallButton.Enabled = enabled && snapshot.Installed && !snapshot.MultipleInstalls;
         // Choosing a directory only matters before an install locks it in.
-        browseButton.Enabled = enabled && !installed && !multiple;
+        browseButton.Enabled = enabled && !snapshot.Installed && !snapshot.MultipleInstalls;
     }
 
     private void Log(string message)
@@ -1649,6 +1673,10 @@ public sealed class ManagerForm : Form
         return Regex.Replace(message ?? "", "\u001B\\[[0-?]*[ -/]*[@-~]", "", RegexOptions.CultureInvariant);
     }
 
+    /// <summary>
+    /// Recomputes everything the panel displays, once, and updates the labels and
+    /// buttons from that single snapshot.
+    /// </summary>
     private void RefreshState()
     {
         discoveredRoots = DiscoverInstallRoots();
@@ -1659,62 +1687,66 @@ public sealed class ManagerForm : Form
             pathBox.Text = discoveredRoots[0];
         if (multiple && !discoveredRoots.Contains(Root, StringComparer.OrdinalIgnoreCase))
             pathBox.Text = discoveredRoots[0];
+
+        HarnessStatusSnapshot snapshot = ComputeStatusSnapshot();
+        if (snapshot.Installed && !IsConfiguredRoot())
+            SaveConfiguredRoot(Root);
+        ApplySnapshot(snapshot);
+        lastSnapshot = snapshot;
+        SetButtons(!busy, snapshot);
+    }
+
+    /// <summary>
+    /// Reads the current state once. Every fact the labels and buttons need comes
+    /// from here, so a refresh probes the port and the process a single time.
+    /// </summary>
+    private HarnessStatusSnapshot ComputeStatusSnapshot()
+    {
         bool installed = IsInstalled();
         bool ready = installed && IsInstallationReady();
-        if (installed && !IsConfiguredRoot())
-            SaveConfiguredRoot(Root);
-        int portPid = FindPortOwner(3080);
         bool portBusy = IsPortOpen(3080);
+        int portPid = portBusy ? FindPortOwner(3080) : 0;
         bool running = portBusy && portPid > 0 && IsLikelyHarnessProcess(portPid);
-        if (multiple)
+        return new HarnessStatusSnapshot(
+            installed,
+            ready,
+            portBusy,
+            running,
+            discoveredRoots.Count > 1,
+            LocalVersion());
+    }
+
+    /// <summary>Applies a snapshot to the three state labels.</summary>
+    private void ApplySnapshot(HarnessStatusSnapshot snapshot)
+    {
+        statusLabel.Text = snapshot.StatusText;
+        runningLabel.Text = snapshot.RunningText;
+        // The version is only meaningful for a single resolved install.
+        versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls ? snapshot.Version : "";
+    }
+
+    /// <summary>
+    /// Polls the state so a crashed or stopped Harness is noticed without the user
+    /// pressing anything. In-flight operations own the labels and buttons, so the
+    /// poll stands down while busy and resumes from a fresh baseline afterwards.
+    /// </summary>
+    private void PollState()
+    {
+        if (busy)
+            return;
+        HarnessStatusSnapshot current = ComputeStatusSnapshot();
+        string change = HarnessStatusChangePolicy.DescribeChange(lastSnapshot, current);
+        // Only touch the labels when something actually changed: re-applying an
+        // unchanged snapshot every few seconds would overwrite the update-available
+        // hint with the plain version.
+        if (lastSnapshot == null || lastSnapshot.DiffersFrom(current))
         {
-            statusLabel.Text = "发现多个安装";
-            runningLabel.Text = running ? "正在运行" : (portBusy ? "端口被其他程序占用" : "未运行");
-            versionLabel.Text = "";
+            ApplySnapshot(current);
+            lastSnapshot = current;
         }
-        else if (installed && !ready)
-        {
-            statusLabel.Text = "安装不完整（需要修复）";
-            runningLabel.Text = "未运行";
-            versionLabel.Text = LocalVersion();
-        }
-        else if (installed && running)
-        {
-            statusLabel.Text = "已安装";
-            runningLabel.Text = "正在运行";
-            versionLabel.Text = LocalVersion();
-        }
-        else if (installed && portBusy)
-        {
-            statusLabel.Text = "已安装";
-            runningLabel.Text = "端口被其他程序占用";
-            versionLabel.Text = LocalVersion();
-        }
-        else if (installed)
-        {
-            statusLabel.Text = "已安装";
-            runningLabel.Text = "未运行";
-            versionLabel.Text = LocalVersion();
-        }
-        else if (running)
-        {
-            statusLabel.Text = "未安装";
-            runningLabel.Text = "正在运行";
-            versionLabel.Text = "";
-        }
-        else if (portBusy)
-        {
-            statusLabel.Text = "未安装";
-            runningLabel.Text = "端口被其他程序占用";
-            versionLabel.Text = "";
-        }
-        else
-        {
-            statusLabel.Text = "未安装";
-            runningLabel.Text = "未运行";
-            versionLabel.Text = "";
-        }
-        SetButtons(!busy);
+        SetButtons(true, current);
+        if (!String.IsNullOrEmpty(change))
+            Log(change);
     }
 
     private async Task InstallAsync()
