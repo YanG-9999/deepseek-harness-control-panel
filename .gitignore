@@ -1,6 +1,6 @@
 bin/
+bin-staging/
 obj/
 *.user
 *.suo
 *.log
-

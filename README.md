@@ -41,6 +41,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 -OutputDirectory .\
 powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1 -OutputDirectory .\bin-staging
 ```
 
+### 界面截图
+
+README 顶部的 `docs/images/panel.png` 是渲染出来的，不是手工截屏。测试里的 `LogViewRenderingTests` 会构造真实的窗口，用 `DrawToBitmap` 画出客户区并存成 `log-preview.png`，所以界面改动后重新生成一次，截图就不会停留在旧版本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1 -OutputDirectory .\bin-staging
+Copy-Item .\bin-staging\log-preview.png .\docs\images\panel.png -Force
+```
+
+截图是代码画出来的，因此它同时也是一道检查：布局被改坏时，先看这张图比对着代码猜要快。
+
 ## 使用
 
 运行生成的控制面板后：
