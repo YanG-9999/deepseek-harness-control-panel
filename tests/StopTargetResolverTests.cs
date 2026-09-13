@@ -48,6 +48,7 @@ public static class StopTargetResolverTests
     {
         ControlPanelLayoutTests.Run();
         BrandMarkArtTests.Run();
+        UiBackgroundTests.Run();
         UninstallTargetPlannerTests.Run();
         LogLineFormatterTests.Run();
         LogViewRenderingTests.Run();

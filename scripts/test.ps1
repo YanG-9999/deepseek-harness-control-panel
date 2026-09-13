@@ -18,6 +18,7 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\UninstallTargetPlannerTests.cs'),
     (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),
     (Join-Path $projectRoot 'tests\BrandMarkArtTests.cs'),
+    (Join-Path $projectRoot 'tests\UiBackgroundTests.cs'),
     (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
     (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs'),

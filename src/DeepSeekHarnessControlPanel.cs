@@ -1013,6 +1013,10 @@ public static class UiShapes
     public static System.Drawing.Drawing2D.GraphicsPath RoundedRect(Rectangle bounds, int radius)
     {
         var path = new System.Drawing.Drawing2D.GraphicsPath();
+        // An empty rectangle has nothing to round, and GDI+ rejects the arcs it would
+        // produce. Cards and fields get resized to nothing while a window is minimized.
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+            return path;
         int diameter = Math.Max(1, radius * 2);
         if (diameter > bounds.Width) diameter = bounds.Width;
         if (diameter > bounds.Height) diameter = bounds.Height;
@@ -1056,6 +1060,35 @@ public static class UiShapes
                     graphics.DrawPath(pen, path);
             }
         }
+    }
+}
+
+/// <summary>
+/// The page gradient behind every card.
+///
+/// Kept as one guarded helper because the unguarded version crashed the panel: a
+/// minimized window has no client area at all (ClientRectangle is 0x0), Windows still
+/// sends it the erase message, and LinearGradientBrush refuses an empty rectangle. The
+/// exception came out of a paint message, so it surfaced as a crash dialog over a window
+/// that looked perfectly healthy.
+/// </summary>
+public static class UiBackground
+{
+    /// <summary>
+    /// Fills <paramref name="bounds"/> with the page gradient, doing nothing when there is
+    /// no area to fill. Callers pass the raw client rectangle, which is empty whenever the
+    /// window is minimized or still has no size.
+    /// </summary>
+    public static void Paint(Graphics graphics, Rectangle bounds)
+    {
+        if (graphics == null || bounds.Width <= 0 || bounds.Height <= 0)
+            return;
+        using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
+            bounds,
+            UiStyle.WindowBackground,
+            UiStyle.WindowBackgroundBottom,
+            System.Drawing.Drawing2D.LinearGradientMode.Vertical))
+            graphics.FillRectangle(brush, bounds);
     }
 }
 
@@ -1210,6 +1243,10 @@ public sealed class UiBrandMark : Control
         // A square tile, centred in whatever space the layout gives it.
         int side = Math.Min(Width, Height);
         var tile = new Rectangle((Width - side) / 2, (Height - side) / 2, side - 1, side - 1);
+        // A collapsed or minimized layout hands out an empty tile, and both the gradient
+        // below and a gradient brush here would refuse it.
+        if (tile.Width <= 0 || tile.Height <= 0)
+            return;
 
         Image art = Source();
         if (art != null)
@@ -3182,12 +3219,9 @@ public sealed class ManagerForm : Form
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
-        using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
-            ClientRectangle,
-            UiStyle.WindowBackground,
-            UiStyle.WindowBackgroundBottom,
-            System.Drawing.Drawing2D.LinearGradientMode.Vertical))
-            e.Graphics.FillRectangle(brush, ClientRectangle);
+        // ClientRectangle is empty while the window is minimized, and the erase message
+        // still arrives: the guard lives in UiBackground.Paint.
+        UiBackground.Paint(e.Graphics, ClientRectangle);
     }
 
     /// <summary>
