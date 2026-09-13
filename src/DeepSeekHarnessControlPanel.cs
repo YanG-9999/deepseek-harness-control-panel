@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.1")]
 
 public enum StopTargetKind
 {
@@ -2223,7 +2223,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.0";
+    public const string Version = "0.1.1";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.

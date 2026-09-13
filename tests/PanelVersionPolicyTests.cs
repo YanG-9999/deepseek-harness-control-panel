@@ -13,6 +13,7 @@ public static class PanelVersionPolicyTests
     public static void Run()
     {
         VerifyDeclaredVersion();
+        VerifyReleaseMetadataAgrees();
         VerifyNumericConversion();
         VerifyNumericRejections();
         VerifyPackageName();
@@ -27,6 +28,38 @@ public static class PanelVersionPolicyTests
             throw new InvalidOperationException("The panel must declare a version.");
         // It has to be convertible, or the installer build would fail later.
         PanelVersionPolicy.ToNumericVersion(version);
+    }
+
+    /// <summary>
+    /// The version is written in four places: the policy constant plus AssemblyVersion,
+    /// AssemblyFileVersion, and AssemblyInformationalVersion. Only the constant is read by
+    /// the build scripts, so the attributes drift silently when a release forgets them -
+    /// and that drift is exactly what makes an installed copy refuse to upgrade itself.
+    /// </summary>
+    private static void VerifyReleaseMetadataAgrees()
+    {
+        string expected = PanelVersionPolicy.ToNumericVersion(PanelVersionPolicy.Version);
+        System.Reflection.Assembly panel = typeof(PanelVersionPolicy).Assembly;
+
+        string assemblyVersion = panel.GetName().Version.ToString();
+        if (assemblyVersion != expected)
+            throw new InvalidOperationException(
+                "AssemblyVersion is " + assemblyVersion + ", but the declared version " +
+                PanelVersionPolicy.Version + " needs " + expected + ".");
+
+        string location = panel.Location;
+        if (String.IsNullOrEmpty(location) || !System.IO.File.Exists(location))
+            return;
+
+        System.Diagnostics.FileVersionInfo info = System.Diagnostics.FileVersionInfo.GetVersionInfo(location);
+        if (info.FileVersion != expected)
+            throw new InvalidOperationException(
+                "The file version resource is " + info.FileVersion + ", but the declared version " +
+                PanelVersionPolicy.Version + " needs " + expected + ".");
+        if (info.ProductVersion != PanelVersionPolicy.Version)
+            throw new InvalidOperationException(
+                "The informational version is " + info.ProductVersion + ", but the declared version is " +
+                PanelVersionPolicy.Version + ".");
     }
 
     private static void VerifyNumericConversion()
