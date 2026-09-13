@@ -849,6 +849,129 @@ public static class HarnessUpdatePolicy
     }
 }
 
+/// <summary>
+/// A point-in-time view of the panel's state. One snapshot is computed per refresh
+/// and shared by the labels, the buttons, and the change detector, so a refresh no
+/// longer recomputes the same port and process facts three separate times.
+/// </summary>
+public sealed class HarnessStatusSnapshot
+{
+    public bool Installed { get; private set; }
+    public bool Ready { get; private set; }
+    public bool PortBusy { get; private set; }
+    public bool Running { get; private set; }
+    public bool MultipleInstalls { get; private set; }
+    public string Version { get; private set; }
+
+    public HarnessStatusSnapshot(
+        bool installed,
+        bool ready,
+        bool portBusy,
+        bool running,
+        bool multipleInstalls,
+        string version)
+    {
+        Installed = installed;
+        Ready = ready;
+        PortBusy = portBusy;
+        Running = running;
+        MultipleInstalls = multipleInstalls;
+        Version = version ?? "";
+    }
+
+    /// <summary>"已安装" / "未安装" label.</summary>
+    public string StatusText
+    {
+        get
+        {
+            if (MultipleInstalls)
+                return "发现多个安装";
+            if (Installed && !Ready)
+                return "安装不完整（需要修复）";
+            return Installed ? "已安装" : "未安装";
+        }
+    }
+
+    /// <summary>"正在运行" / "未运行" / "端口被其他程序占用" label.</summary>
+    public string RunningText
+    {
+        get
+        {
+            if (Running)
+                return "正在运行";
+            return PortBusy ? "端口被其他程序占用" : "未运行";
+        }
+    }
+
+    /// <summary>
+    /// The fields that define a meaningful change. Version is derived from the same
+    /// inputs, so a separate check would double-report a single transition.
+    /// </summary>
+    public bool DiffersFrom(HarnessStatusSnapshot other)
+    {
+        if (other == null)
+            return true;
+        return Installed != other.Installed
+            || Ready != other.Ready
+            || PortBusy != other.PortBusy
+            || Running != other.Running
+            || MultipleInstalls != other.MultipleInstalls
+            || !String.Equals(Version, other.Version, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// Turns two snapshots into the single line the log shows when something actually
+/// changed. The panel polls every few seconds, so describing an unchanged state
+/// would flood the log and bury the events that matter.
+/// </summary>
+public static class HarnessStatusChangePolicy
+{
+    /// <summary>
+    /// A description of the transition, or an empty string when nothing changed.
+    /// The wording names both sides so the log reads as an event, not a state dump.
+    /// </summary>
+    public static string DescribeChange(HarnessStatusSnapshot previous, HarnessStatusSnapshot current)
+    {
+        if (previous == null || current == null)
+            return "";
+
+        // Process lifecycle is the event the user most needs to notice.
+        if (previous.Running && !current.Running)
+        {
+            if (current.PortBusy)
+                return "Harness 已停止，但 3080 端口仍被其他程序占用。";
+            return "Harness 进程已退出，服务不再监听 3080。";
+        }
+        if (!previous.Running && current.Running)
+            return "检测到 Harness 已开始运行。";
+
+        // The port changing hands while Harness is not the listener.
+        if (!previous.PortBusy && current.PortBusy && !current.Running)
+            return "3080 端口被其他程序占用。";
+        if (previous.PortBusy && !current.PortBusy && !current.Running)
+            return "3080 端口已被释放。";
+
+        if (!previous.Installed && current.Installed)
+            return "检测到 Harness 安装。";
+        if (previous.Installed && !current.Installed)
+            return "Harness 安装目录已不可用（可能被移动或删除）。";
+
+        if (previous.Installed && previous.Ready && !current.Ready)
+            return "Harness 安装不再完整，需要修复。";
+        if (previous.Installed && !previous.Ready && current.Ready)
+            return "Harness 安装已恢复完整。";
+
+        if (!previous.MultipleInstalls && current.MultipleInstalls)
+            return "发现多个 Harness 安装，操作已暂停。";
+        if (previous.MultipleInstalls && !current.MultipleInstalls)
+            return "安装数量已恢复为单个。";
+
+        // Anything else is not worth a log line.
+        return "";
+    }
+}
+
 public static class HarnessLifecyclePolicy
 {    public const int StartupTimeoutSeconds = 120;
     public const int StopTimeoutMilliseconds = 30000;
