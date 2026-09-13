@@ -2314,10 +2314,10 @@ public static class TrayClosePolicy
 
     public static string BuildClosePrompt(int port)
     {
-        return "关闭窗口不会停止 Harness 服务，它仍会在 " + port + " 端口监听。" + Environment.NewLine + Environment.NewLine +
-            "面板本身要怎么处理？此选择会被记住，以后关闭窗口不再询问。" + Environment.NewLine +
-            "· " + ClosePromptTrayAnswer + "：面板继续运行，随时可从托盘图标打开。" + Environment.NewLine +
-            "· " + ClosePromptExitAnswer + "：完全关闭控制面板，Harness 不受影响。";
+        return "关闭窗口不会停止 Harness 服务，它仍在 " + port + " 端口监听。" + Environment.NewLine + Environment.NewLine +
+            "面板本身要怎么处理？此选择会被记住，以后关闭不再询问。" + Environment.NewLine +
+            "· " + ClosePromptTrayAnswer + "：面板继续运行，可从托盘图标打开。" + Environment.NewLine +
+            "· " + ClosePromptExitAnswer + "：完全关闭面板，Harness 不受影响。";
     }
 
     /// <summary>The remembered answer, as it is stored in the settings file.</summary>
@@ -3154,6 +3154,17 @@ public sealed class ManagerForm : Form
     /// </summary>
     private TrayCloseAction AskCloseAction(out bool answered)
     {
+        // The dialog's measurements, kept together because the client size is derived from
+        // them: 14 px of page around a card, 26 px of card inside its edges, and the two
+        // 44 px answer buttons.
+        const int DialogPadding = 14;
+        const int CardPaddingX = 26;
+        const int CardPaddingTop = 24;
+        const int CardPaddingBottom = 22;
+        const int MessageWidth = 540;
+        const int ButtonHeight = 44;
+        const int ButtonWidth = 158;
+
         TrayCloseAction choice = TrayCloseAction.MinimizeToTray;
         // An out parameter cannot be touched from the click handlers, so the answer is
         // collected here and handed back after the dialog closes.
@@ -3162,45 +3173,108 @@ public sealed class ManagerForm : Form
         using (var dialog = new Form())
         {
             dialog.Text = TrayClosePolicy.ClosePromptTitle;
+            dialog.Icon = Icon;
             dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
             dialog.StartPosition = FormStartPosition.CenterParent;
             dialog.MinimizeBox = false;
             dialog.MaximizeBox = false;
             dialog.ShowInTaskbar = false;
-            dialog.BackColor = UiStyle.CardBackground;
             dialog.Font = UiStyle.BodyFont();
-            dialog.ClientSize = new Size(492, 214);
+            // The page colour, so the strip around the card is right from the first frame
+            // rather than flashing the default control grey.
+            dialog.BackColor = UiStyle.WindowBackground;
+
+            // The same page-under-card arrangement the panel itself uses: the gradient is
+            // the page, the white rounded card holds everything. A stock dialog with its
+            // own spacing and button sizes reads as a different program.
+            dialog.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                UiBackground.Paint(e.Graphics, dialog.ClientRectangle);
+            };
+
+            var card = new UiCardPanel();
+            card.Dock = DockStyle.Fill;
+            card.Margin = new Padding(0);
+            dialog.Padding = new Padding(DialogPadding);
+            dialog.Controls.Add(card);
+
+            // Laid out rather than placed at fixed coordinates: the dialog's client size
+            // is not what the constructor asked for once Windows has had its say about
+            // scaling, and fixed positions clipped the last line of the message.
+            var layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.Margin = new Padding(0);
+            layout.ColumnCount = 1;
+            layout.RowCount = 2;
+            layout.BackColor = Color.Transparent;
+            layout.Padding = new Padding(CardPaddingX, CardPaddingTop, CardPaddingX, CardPaddingBottom);
+            // Without an explicit column style the single column sizes itself and the
+            // message gets a narrower box than it was measured against.
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ButtonHeight));
+            card.Controls.Add(layout);
 
             var message = new Label();
             message.Text = TrayClosePolicy.BuildClosePrompt(Port);
             message.Font = UiStyle.BodyFont();
             message.ForeColor = UiStyle.TextPrimary;
             message.BackColor = Color.Transparent;
-            message.Bounds = new Rectangle(20, 16, 452, 136);
-            dialog.Controls.Add(message);
+            // Measured before the dialog is sized: the text wraps to a different number of
+            // lines than the source suggests, and a dialog sized by eye either clips the
+            // last line or leaves a gap where nothing is.
+            message.AutoSize = true;
+            // Measured a little narrower than the label ends up, so the wrap that is
+            // measured is at least as tall as the wrap that is drawn; measuring at the
+            // exact width came out one line short and clipped the last bullet.
+            message.MaximumSize = new Size(MessageWidth - 16, 0);
+            int messageHeight = message.PreferredSize.Height + 8;
+            message.AutoSize = false;
+            message.Dock = DockStyle.Fill;
+            message.Margin = new Padding(0);
+            message.TextAlign = ContentAlignment.TopLeft;
+            layout.Controls.Add(message, 0, 0);
+
+            dialog.ClientSize = new Size(
+                MessageWidth + (CardPaddingX * 2) + (DialogPadding * 2),
+                messageHeight + CardPaddingTop + CardPaddingBottom + ButtonHeight + (DialogPadding * 2));
+
+            var buttons = new TableLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.Margin = new Padding(0);
+            buttons.ColumnCount = 3;
+            buttons.RowCount = 1;
+            buttons.BackColor = Color.Transparent;
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ButtonWidth));
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ButtonWidth));
+            buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.Controls.Add(buttons, 0, 1);
 
             var keepRunning = new UiFlatButton();
             keepRunning.Text = TrayClosePolicy.ClosePromptTrayAnswer;
             keepRunning.IsPrimary = true;
-            keepRunning.Bounds = new Rectangle(168, 162, 150, 36);
+            keepRunning.Dock = DockStyle.Fill;
+            keepRunning.Margin = new Padding(0, 0, 6, 0);
             keepRunning.Click += delegate
             {
                 choice = TrayCloseAction.MinimizeToTray;
                 confirmed = true;
                 dialog.Close();
             };
-            dialog.Controls.Add(keepRunning);
+            buttons.Controls.Add(keepRunning, 1, 0);
 
             var quit = new UiFlatButton();
             quit.Text = TrayClosePolicy.ClosePromptExitAnswer;
-            quit.Bounds = new Rectangle(326, 162, 150, 36);
+            quit.Dock = DockStyle.Fill;
+            quit.Margin = new Padding(6, 0, 0, 0);
             quit.Click += delegate
             {
                 choice = TrayCloseAction.Exit;
                 confirmed = true;
                 dialog.Close();
             };
-            dialog.Controls.Add(quit);
+            buttons.Controls.Add(quit, 2, 0);
 
             dialog.AcceptButton = keepRunning;
             dialog.ShowDialog(this);
