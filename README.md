@@ -2,6 +2,8 @@
 
 用于 Windows 10/11 x64 的 DeepSeek Harness 管理工具。它可检测本机安装、安装官方 Harness、启动、重启、停止，以及检查 Harness 更新。
 
+![控制面板主界面](docs/images/panel.png)
+
 ## 包含内容
 
 - `src/DeepSeekHarnessControlPanel.cs`：Windows Forms 源码
@@ -13,6 +15,7 @@
 - `installer/DeepSeekHarnessControlPanel.iss`：Inno Setup 安装脚本
 - `tests/`：策略类测试（纯逻辑，不依赖网络与 Harness 安装）
 - `LICENSE`：MIT 许可证
+- `docs/images/panel.png`：上面的界面截图，由测试渲染生成
 
 本仓库不包含 API Key、用户配置、Harness 安装目录、依赖缓存或测试日志。
 
