@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.1")]
+[assembly: System.Reflection.AssemblyVersion("0.1.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.2.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.2")]
 
 public enum StopTargetKind
 {
@@ -2223,7 +2223,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.1";
+    public const string Version = "0.1.2";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.
@@ -2291,11 +2291,6 @@ public enum TrayCloseAction
 /// </summary>
 public static class TrayClosePolicy
 {
-    public static TrayCloseAction Resolve(bool exitRequestedFromTray)
-    {
-        return exitRequestedFromTray ? TrayCloseAction.Exit : TrayCloseAction.MinimizeToTray;
-    }
-
     /// <summary>
     /// Whether the close prompt should be shown. Asking every single time is noise, so
     /// the user's answer is remembered and the prompt is skipped afterwards.
@@ -2306,15 +2301,56 @@ public static class TrayClosePolicy
     }
 
     /// <summary>
-    /// The close prompt. It names what keeps running, because "close" no longer means
-    /// the service stops.
+    /// The close prompt's title and the two answers, which are also its button labels.
+    ///
+    /// A MessageBox cannot label its buttons, and that was this prompt's defect: the text
+    /// offered "最小化到托盘" and "退出" while the buttons read 是 and 否, so the two
+    /// choices on screen were not the two the sentence named, and 是 meant the drastic
+    /// one. The answers are exported so the dialog and the wording cannot drift apart.
     /// </summary>
+    public const string ClosePromptTitle = "关闭控制面板";
+    public const string ClosePromptTrayAnswer = "最小化到托盘";
+    public const string ClosePromptExitAnswer = "退出面板";
+
     public static string BuildClosePrompt(int port)
     {
-        return "关闭窗口后控制面板会继续在托盘运行，Harness 服务不受影响。" + Environment.NewLine + Environment.NewLine +
-            "· 点“最小化到托盘”：面板留在托盘，可随时从托盘图标打开。" + Environment.NewLine +
-            "· 点“退出”：完全关闭控制面板（Harness 若在运行会继续运行）。" + Environment.NewLine + Environment.NewLine +
-            "Harness 当前监听端口：" + port + "。";
+        return "关闭窗口不会停止 Harness 服务，它仍会在 " + port + " 端口监听。" + Environment.NewLine + Environment.NewLine +
+            "面板本身要怎么处理？此选择会被记住，以后关闭窗口不再询问。" + Environment.NewLine +
+            "· " + ClosePromptTrayAnswer + "：面板继续运行，随时可从托盘图标打开。" + Environment.NewLine +
+            "· " + ClosePromptExitAnswer + "：完全关闭控制面板，Harness 不受影响。";
+    }
+
+    /// <summary>The remembered answer, as it is stored in the settings file.</summary>
+    public const string TraySettingValue = "tray";
+    public const string ExitSettingValue = "exit";
+
+    public static string ToSettingValue(TrayCloseAction action)
+    {
+        return action == TrayCloseAction.Exit ? ExitSettingValue : TraySettingValue;
+    }
+
+    /// <summary>
+    /// Reads the remembered answer. A missing, older, or hand-edited value means the
+    /// question has not been answered yet, which is the safe reading: the panel asks
+    /// rather than guessing on the user's behalf.
+    /// </summary>
+    public static bool TryParseSettingValue(string stored, out TrayCloseAction action)
+    {
+        action = TrayCloseAction.MinimizeToTray;
+        if (String.IsNullOrEmpty(stored))
+            return false;
+        string candidate = stored.Trim();
+        if (String.Equals(candidate, ExitSettingValue, StringComparison.OrdinalIgnoreCase))
+        {
+            action = TrayCloseAction.Exit;
+            return true;
+        }
+        if (String.Equals(candidate, TraySettingValue, StringComparison.OrdinalIgnoreCase))
+        {
+            action = TrayCloseAction.MinimizeToTray;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -2980,8 +3016,13 @@ public sealed class ManagerForm : Form
     /// <summary>Whether the user asked to exit, as opposed to closing the window.</summary>
     private bool exitRequested;
 
-    /// <summary>Set once the close prompt has been answered, so it is not repeated.</summary>
-    private bool closePromptAnswered;
+    /// <summary>
+    /// What closing the window does, and whether the user has already said so. The answer
+    /// is read from the settings file at startup and written back on the first close, so
+    /// the question is asked once in the panel's life instead of once per launch.
+    /// </summary>
+    private TrayCloseAction closeAction = TrayCloseAction.MinimizeToTray;
+    private bool closeAnswerKnown;
 
     private Process server;
     private List<string> discoveredRoots = new List<string>();
@@ -3020,6 +3061,10 @@ public sealed class ManagerForm : Form
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
         RefreshState();
+
+        // Whether closing the window minimises to the tray or exits is remembered from the
+        // first time the user was asked; see OnFormClosing.
+        closeAnswerKnown = TrayClosePolicy.TryParseSettingValue(LoadSetting("closeBehavior"), out closeAction);
 
         // Check for an upstream release once the window is up. Runs after the first
         // paint and never blocks or alerts: a failed check is a normal condition.
@@ -3080,26 +3125,104 @@ public sealed class ManagerForm : Form
         if (exitRequested || e.CloseReason == CloseReason.WindowsShutDown)
             return;
 
-        if (TrayClosePolicy.ShouldAskOnClose(closePromptAnswered))
+        if (TrayClosePolicy.ShouldAskOnClose(closeAnswerKnown))
         {
-            DialogResult answer = MessageBox.Show(
-                this,
-                TrayClosePolicy.BuildClosePrompt(Port),
-                "关闭控制面板",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
-            closePromptAnswered = true;
-            if (answer == DialogResult.Yes)
+            bool answered;
+            closeAction = AskCloseAction(out answered);
+            if (!answered)
             {
-                ExitFromTray();
+                // The user backed out of the question, so nothing is decided and the
+                // window stays where it is.
+                e.Cancel = true;
                 return;
             }
+            closeAnswerKnown = true;
+            RememberCloseAction(closeAction);
         }
 
-        if (TrayClosePolicy.Resolve(false) == TrayCloseAction.MinimizeToTray)
-        {
-            e.Cancel = true;
+        e.Cancel = true;
+        if (closeAction == TrayCloseAction.Exit)
+            ExitFromTray();
+        else
             HideToTray();
+    }
+
+    /// <summary>
+    /// Asks how closing the window should behave, with the two answers as buttons.
+    /// Closing the dialog itself reports answered = false: the question stays unanswered
+    /// and the panel stays open, which is the only reading that changes nothing.
+    /// </summary>
+    private TrayCloseAction AskCloseAction(out bool answered)
+    {
+        TrayCloseAction choice = TrayCloseAction.MinimizeToTray;
+        // An out parameter cannot be touched from the click handlers, so the answer is
+        // collected here and handed back after the dialog closes.
+        bool confirmed = false;
+
+        using (var dialog = new Form())
+        {
+            dialog.Text = TrayClosePolicy.ClosePromptTitle;
+            dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+            dialog.StartPosition = FormStartPosition.CenterParent;
+            dialog.MinimizeBox = false;
+            dialog.MaximizeBox = false;
+            dialog.ShowInTaskbar = false;
+            dialog.BackColor = UiStyle.CardBackground;
+            dialog.Font = UiStyle.BodyFont();
+            dialog.ClientSize = new Size(492, 214);
+
+            var message = new Label();
+            message.Text = TrayClosePolicy.BuildClosePrompt(Port);
+            message.Font = UiStyle.BodyFont();
+            message.ForeColor = UiStyle.TextPrimary;
+            message.BackColor = Color.Transparent;
+            message.Bounds = new Rectangle(20, 16, 452, 136);
+            dialog.Controls.Add(message);
+
+            var keepRunning = new UiFlatButton();
+            keepRunning.Text = TrayClosePolicy.ClosePromptTrayAnswer;
+            keepRunning.IsPrimary = true;
+            keepRunning.Bounds = new Rectangle(168, 162, 150, 36);
+            keepRunning.Click += delegate
+            {
+                choice = TrayCloseAction.MinimizeToTray;
+                confirmed = true;
+                dialog.Close();
+            };
+            dialog.Controls.Add(keepRunning);
+
+            var quit = new UiFlatButton();
+            quit.Text = TrayClosePolicy.ClosePromptExitAnswer;
+            quit.Bounds = new Rectangle(326, 162, 150, 36);
+            quit.Click += delegate
+            {
+                choice = TrayCloseAction.Exit;
+                confirmed = true;
+                dialog.Close();
+            };
+            dialog.Controls.Add(quit);
+
+            dialog.AcceptButton = keepRunning;
+            dialog.ShowDialog(this);
+        }
+        answered = confirmed;
+        return choice;
+    }
+
+    /// <summary>
+    /// Stores the answer, so the question is asked once in the panel's life rather than
+    /// once per launch. Failing to save only costs a repeated question, so it is logged
+    /// and not treated as fatal.
+    /// </summary>
+    private void RememberCloseAction(TrayCloseAction action)
+    {
+        try
+        {
+            SaveSetting("closeBehavior", TrayClosePolicy.ToSettingValue(action));
+        }
+        catch (Exception ex)
+        {
+            Log("保存关闭方式失败: " + ex.Message);
         }
     }
 
@@ -5959,13 +6082,18 @@ public sealed class ManagerForm : Form
 
     private string LoadConfiguredRoot()
     {
-        if (File.Exists(SettingsFile))
-        {
-            string configured = ReadJsonValue(File.ReadAllText(SettingsFile), "installRoot");
-            if (!String.IsNullOrEmpty(configured))
-                return configured;
-        }
+        string configured = LoadSetting("installRoot");
+        if (!String.IsNullOrEmpty(configured))
+            return configured;
         return DefaultInstallRoot();
+    }
+
+    /// <summary>One value from the settings file, or an empty string when it is not there.</summary>
+    private string LoadSetting(string key)
+    {
+        if (!File.Exists(SettingsFile))
+            return "";
+        return ReadJsonValue(File.ReadAllText(SettingsFile), key);
     }
 
     /// <summary>
@@ -5996,9 +6124,15 @@ public sealed class ManagerForm : Form
         var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(SettingsFile))
         {
-            string current = ReadJsonValue(File.ReadAllText(SettingsFile), "installRoot");
-            if (!String.IsNullOrEmpty(current))
-                settings["installRoot"] = current;
+            string text = File.ReadAllText(SettingsFile);
+            // Only the keys named here are carried over, so a new setting has to be added
+            // to this list or the first write of any other key silently drops it.
+            foreach (string preserved in new[] { "installRoot", "closeBehavior" })
+            {
+                string current = ReadJsonValue(text, preserved);
+                if (!String.IsNullOrEmpty(current))
+                    settings[preserved] = current;
+            }
         }
         settings[key] = value ?? "";
 

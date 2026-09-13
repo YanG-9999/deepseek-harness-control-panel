@@ -18,23 +18,47 @@ public static class AutoStartAndTrayPolicyTests
     {
         VerifyCloseBehaviour();
         VerifyClosePrompt();
+        VerifyRememberedAnswer();
         VerifyTooltip();
         Console.WriteLine("Tray close policy tests passed.");
     }
 
     private static void VerifyCloseBehaviour()
     {
-        // Closing the window keeps the panel alive; only an explicit exit ends it.
-        if (TrayClosePolicy.Resolve(false) != TrayCloseAction.MinimizeToTray)
-            throw new InvalidOperationException("Closing the window must minimize to the tray.");
-        if (TrayClosePolicy.Resolve(true) != TrayCloseAction.Exit)
-            throw new InvalidOperationException("An explicit exit must actually exit.");
-
-        // The prompt is asked once and then remembered, so it is not noise.
+        // Closing the window never stops Harness, and the panel only goes away if the user
+        // says so. Which of the two the window's X does is the user's answer, remembered
+        // across launches, so the only rule left in the policy is that it is asked once.
         if (!TrayClosePolicy.ShouldAskOnClose(false))
             throw new InvalidOperationException("The first close must explain what happens.");
         if (TrayClosePolicy.ShouldAskOnClose(true))
             throw new InvalidOperationException("The close prompt must not repeat once answered.");
+    }
+
+    /// <summary>
+    /// The remembered answer has to survive a restart, which is the whole point: the old
+    /// in-memory flag made "asked once" mean "asked once per launch", so anyone who closes
+    /// the panel and opens it again was asked again.
+    /// </summary>
+    private static void VerifyRememberedAnswer()
+    {
+        TrayCloseAction action;
+        if (!TrayClosePolicy.TryParseSettingValue(
+            TrayClosePolicy.ToSettingValue(TrayCloseAction.MinimizeToTray), out action) ||
+            action != TrayCloseAction.MinimizeToTray)
+            throw new InvalidOperationException("A remembered 'minimize to tray' must be read back as itself.");
+        if (!TrayClosePolicy.TryParseSettingValue(
+            TrayClosePolicy.ToSettingValue(TrayCloseAction.Exit), out action) ||
+            action != TrayCloseAction.Exit)
+            throw new InvalidOperationException("A remembered exit must be read back as an exit.");
+        if (!TrayClosePolicy.TryParseSettingValue("  EXIT  ", out action) || action != TrayCloseAction.Exit)
+            throw new InvalidOperationException("The stored value must be read without regard to case or padding.");
+
+        // Anything unrecognised means "not answered yet": asking is safer than guessing.
+        foreach (string stored in new[] { null, "", "   ", "sometimes", "trayy" })
+        {
+            if (TrayClosePolicy.TryParseSettingValue(stored, out action))
+                throw new InvalidOperationException("'" + stored + "' must not count as an answer.");
+        }
     }
 
     private static void VerifyClosePrompt()
@@ -46,6 +70,17 @@ public static class AutoStartAndTrayPolicyTests
             throw new InvalidOperationException("The prompt must say the panel keeps running in the tray.");
         if (prompt.IndexOf("退出", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The prompt must offer the real exit.");
+
+        // The answers the text names have to be the answers the dialog shows. The old
+        // prompt described two buttons that did not exist, next to 是 and 否.
+        if (prompt.IndexOf(TrayClosePolicy.ClosePromptTrayAnswer, StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The prompt must name the tray answer the dialog offers.");
+        if (prompt.IndexOf(TrayClosePolicy.ClosePromptExitAnswer, StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The prompt must name the exit answer the dialog offers.");
+        if (TrayClosePolicy.ClosePromptTrayAnswer == TrayClosePolicy.ClosePromptExitAnswer)
+            throw new InvalidOperationException("The two answers need distinct labels.");
+        if (String.IsNullOrWhiteSpace(TrayClosePolicy.ClosePromptTitle))
+            throw new InvalidOperationException("The close prompt needs a title.");
 
         // The menu labels must exist. There is deliberately no auto-start entry.
         string[] labels = new[]
