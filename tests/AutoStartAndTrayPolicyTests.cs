@@ -1,92 +1,25 @@
 using System;
 
 /// <summary>
-/// Covers the auto-start registration rules and the tray close behaviour.
+/// Covers the tray close behaviour.
 ///
 /// The close rule matters because "close" no longer means "stop": a management panel
 /// that vanished on close would make its tray icon pointless, while exiting still has
-/// to be reachable. The auto-start rules matter because the registry entry is the one
-/// thing here that outlives the process.
+/// to be reachable.
+///
+/// The auto-start registration this file used to cover is gone. It wrote an HKCU Run
+/// entry, was the only feature that persisted a change outside the Harness directories,
+/// and was never used: the panel is opened on demand to start and inspect Harness, not
+/// left running for Windows to relaunch.
 /// </summary>
 public static class AutoStartAndTrayPolicyTests
 {
     public static void Run()
     {
-        VerifyAutoStartCommand();
-        VerifyAutoStartDetection();
-        VerifyAutoStartMatching();
-        VerifyTrayStartArgument();
         VerifyCloseBehaviour();
         VerifyClosePrompt();
         VerifyTooltip();
-        Console.WriteLine("Auto-start and tray policy tests passed.");
-    }
-
-    private static void VerifyAutoStartCommand()
-    {
-        string command = AutoStartPolicy.BuildCommand(@"C:\Program Files\DSH\panel.exe");
-        // Quoted because the path contains spaces, and Windows would otherwise split it.
-        if (command.IndexOf("\"C:\\Program Files\\DSH\\panel.exe\"", StringComparison.Ordinal) != 0)
-            throw new InvalidOperationException("The executable path must be quoted: " + command);
-        if (command.IndexOf("--tray", StringComparison.Ordinal) < 0)
-            throw new InvalidOperationException("A logon start must request the tray mode: " + command);
-
-        AssertThrows("blank path", delegate { AutoStartPolicy.BuildCommand(""); });
-        AssertThrows("null path", delegate { AutoStartPolicy.BuildCommand(null); });
-
-        // The key is per-user, which is what keeps the feature free of elevation.
-        if (AutoStartPolicy.RunKeyPath.IndexOf("CurrentVersion\\Run", StringComparison.Ordinal) < 0)
-            throw new InvalidOperationException("The entry must live under the Run key.");
-        if (String.IsNullOrWhiteSpace(AutoStartPolicy.ValueName))
-            throw new InvalidOperationException("The entry needs a stable value name.");
-    }
-
-    private static void VerifyAutoStartDetection()
-    {
-        if (!AutoStartPolicy.IsTrayStart(new[] { "--tray" }))
-            throw new InvalidOperationException("--tray must be recognised.");
-        if (!AutoStartPolicy.IsTrayStart(new[] { "--TRAY" }))
-            throw new InvalidOperationException("The switch must be recognised case-insensitively.");
-        if (!AutoStartPolicy.IsTrayStart(new[] { "--other", "--tray" }))
-            throw new InvalidOperationException("The switch must be recognised among other arguments.");
-
-        if (AutoStartPolicy.IsTrayStart(new string[0]))
-            throw new InvalidOperationException("No arguments must not mean a tray start.");
-        if (AutoStartPolicy.IsTrayStart(null))
-            throw new InvalidOperationException("A null argument list must not mean a tray start.");
-        if (AutoStartPolicy.IsTrayStart(new[] { "--trayish" }))
-            throw new InvalidOperationException("A partial match must not count.");
-    }
-
-    private static void VerifyAutoStartMatching()
-    {
-        string path = @"C:\app\panel.exe";
-        string expected = AutoStartPolicy.BuildCommand(path);
-
-        if (!AutoStartPolicy.Matches(expected, path))
-            throw new InvalidOperationException("An identical command must match.");
-        if (!AutoStartPolicy.Matches("  " + expected + "  ", path))
-            throw new InvalidOperationException("Surrounding whitespace must not defeat the match.");
-        if (!AutoStartPolicy.Matches(expected.ToUpperInvariant(), path))
-            throw new InvalidOperationException("Path comparison must be case-insensitive.");
-
-        if (AutoStartPolicy.Matches("", path))
-            throw new InvalidOperationException("An empty stored command must not match.");
-        if (AutoStartPolicy.Matches(null, path))
-            throw new InvalidOperationException("A null stored command must not match.");
-        if (AutoStartPolicy.Matches(expected, ""))
-            throw new InvalidOperationException("A blank path must not match.");
-        // A stale entry pointing at a moved executable must not be reported as current.
-        if (AutoStartPolicy.Matches(@"""C:\old\panel.exe"" --tray", path))
-            throw new InvalidOperationException("An entry for a different executable must not match.");
-    }
-
-    private static void VerifyTrayStartArgument()
-    {
-        if (!AutoStartPolicy.IsTrayStart(new[] { AutoStartPolicy.TrayArgument }))
-            throw new InvalidOperationException("The documented switch must be the one parsed.");
-        if (AutoStartPolicy.TrayArgument != "--tray")
-            throw new InvalidOperationException("The switch is a contract with the registry entry, so it must stay stable.");
+        Console.WriteLine("Tray close policy tests passed.");
     }
 
     private static void VerifyCloseBehaviour()
@@ -114,14 +47,13 @@ public static class AutoStartAndTrayPolicyTests
         if (prompt.IndexOf("退出", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The prompt must offer the real exit.");
 
-        // The menu labels must exist and stay distinct.
+        // The menu labels must exist. There is deliberately no auto-start entry.
         string[] labels = new[]
         {
             TrayClosePolicy.MenuShow,
             TrayClosePolicy.MenuOpenPage,
             TrayClosePolicy.MenuStart,
             TrayClosePolicy.MenuStop,
-            TrayClosePolicy.MenuAutoStart,
             TrayClosePolicy.MenuExit
         };
         foreach (string label in labels)
@@ -141,7 +73,7 @@ public static class AutoStartAndTrayPolicyTests
         if (running.IndexOf("0.1.5-rc.2", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The tooltip must show the version.");
 
-        string stopped = TrayClosePolicy.BuildTooltip(false, 8099, "");
+        string stopped = TrayClosePolicy.BuildTooltip(false, 3099, "");
         if (stopped.IndexOf("未运行", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The tooltip must show a stopped service.");
 
@@ -150,18 +82,5 @@ public static class AutoStartAndTrayPolicyTests
         string truncated = TrayClosePolicy.BuildTooltip(true, 65535, longVersion);
         if (truncated.Length > 63)
             throw new InvalidOperationException("The tooltip must fit the platform limit, got " + truncated.Length + ".");
-    }
-
-    private static void AssertThrows(string label, Action action)
-    {
-        try
-        {
-            action();
-        }
-        catch (InvalidOperationException)
-        {
-            return;
-        }
-        throw new InvalidOperationException("Expected an InvalidOperationException for " + label + ".");
     }
 }

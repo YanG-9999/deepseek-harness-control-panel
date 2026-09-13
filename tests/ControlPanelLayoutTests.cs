@@ -24,25 +24,25 @@ public static class ControlPanelLayoutTests
     }
 
     /// <summary>
-    /// The version row shows the installed version and the auto-start switch. The version
-    /// must be a version number: it used to be overwritten by the update-check result.
+    /// The version row shows the installed version. It must be a version number: it used
+    /// to be overwritten by the update-check result, and it also carried an auto-start
+    /// switch that has since been removed.
     /// </summary>
     private static void VerifyVersionRowExists(Control form)
     {
         TableLayoutPanel row = FindRowContainingLabel(form, "Harness 版本");
         if (row == null)
             throw new InvalidOperationException("The version row was not found.");
-        if (row.Controls.Count != 3)
+        if (row.Controls.Count != 2)
             throw new InvalidOperationException(
-                "The version row must hold the label, the version, and the auto-start switch, got " + row.Controls.Count + ".");
+                "The version row must hold the label and the version, got " + row.Controls.Count + ".");
 
-        bool hasCheckBox = false;
         foreach (Control child in row.Controls)
         {
-            if (child is CheckBox) hasCheckBox = true;
+            if (child is CheckBox)
+                throw new InvalidOperationException(
+                    "The auto-start switch was removed on purpose; the version row holds no controls of its own.");
         }
-        if (!hasCheckBox)
-            throw new InvalidOperationException("The auto-start switch belongs on the version row.");
     }
 
     /// <summary>

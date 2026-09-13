@@ -1038,63 +1038,6 @@ public static class PanelVersionPolicy
     }
 }
 
-/// <summary>
-/// The startup registration that makes the panel launch with Windows.
-///
-/// It lives under HKCU rather than HKLM on purpose: a machine-wide entry would need
-/// administrator rights, and this panel deliberately installs per-user without ever
-/// requesting elevation. The entry is opt-in and never written unless the user asks.
-/// </summary>
-public static class AutoStartPolicy
-{
-    public const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-
-    /// <summary>Value name under the Run key. Stable, so disabling can find it again.</summary>
-    public const string ValueName = "DeepSeekHarnessControlPanel";
-
-    /// <summary>
-    /// The command Windows should run. Quoted because the executable can live under a
-    /// path with spaces, and suffixed so the panel starts hidden in the tray.
-    /// </summary>
-    public const string TrayArgument = "--tray";
-
-    public static string BuildCommand(string executablePath)
-    {
-        if (String.IsNullOrWhiteSpace(executablePath))
-            throw new InvalidOperationException("可执行文件路径为空，无法设置开机自启。");
-        return "\"" + executablePath + "\" " + TrayArgument;
-    }
-
-    /// <summary>
-    /// Whether the argument list requests a tray start.
-    /// </summary>
-    public static bool IsTrayStart(string[] arguments)
-    {
-        if (arguments == null)
-            return false;
-        foreach (string argument in arguments)
-        {
-            if (String.Equals(argument, TrayArgument, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// Whether a stored command already matches what we would write. Used to avoid
-    /// rewriting the key on every launch, which would be pointless registry churn.
-    /// </summary>
-    public static bool Matches(string storedCommand, string executablePath)
-    {
-        if (String.IsNullOrWhiteSpace(storedCommand) || String.IsNullOrWhiteSpace(executablePath))
-            return false;
-        return String.Equals(
-            storedCommand.Trim(),
-            BuildCommand(executablePath).Trim(),
-            StringComparison.OrdinalIgnoreCase);
-    }
-}
-
 public enum TrayCloseAction
 {
     /// <summary>Keep running in the tray; the service should stay available.</summary>
@@ -1145,7 +1088,6 @@ public static class TrayClosePolicy
     public const string MenuOpenPage = "打开 Harness 页面";
     public const string MenuStart = "启动 Harness";
     public const string MenuStop = "停止 Harness";
-    public const string MenuAutoStart = "开机自动启动";
     public const string MenuExit = "退出";
 
     /// <summary>
@@ -1872,13 +1814,6 @@ public sealed class ManagerForm : Form
     /// <summary>Set once the close prompt has been answered, so it is not repeated.</summary>
     private bool closePromptAnswered;
 
-    private readonly CheckBox autoStartCheck = new CheckBox();
-
-    /// <summary>
-    /// Whether this launch should stay in the tray. Set when Windows starts the panel
-    /// at logon, so the window does not appear unbidden.
-    /// </summary>
-    private readonly bool startHiddenInTray;
     private Process server;
     private List<string> discoveredRoots = new List<string>();
     private string selectedNodeDirectory = "";
@@ -1898,18 +1833,7 @@ public sealed class ManagerForm : Form
     private bool nodeTransportRequired;
 
     public ManagerForm()
-        : this(false)
     {
-    }
-
-    /// <summary>
-    /// <paramref name="startHidden"/> is set when Windows launched the panel at logon,
-    /// so it waits in the tray instead of opening a window over whatever the user is
-    /// doing.
-    /// </summary>
-    public ManagerForm(bool startHidden)
-    {
-        startHiddenInTray = startHidden;
         Text = "DeepSeek Harness 控制面板";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Width = 760;
@@ -1938,12 +1862,6 @@ public sealed class ManagerForm : Form
         FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
 
         BuildTrayIcon();
-        LoadAutoStartState();
-
-        // A tray start means Windows launched us at logon; the window should stay out
-        // of the way until it is asked for.
-        if (startHiddenInTray)
-            BeginInvoke((Action)delegate { HideToTray(); });
     }
 
     /// <summary>
@@ -2048,92 +1966,6 @@ public sealed class ManagerForm : Form
         exitRequested = true;
         trayIcon.Visible = false;
         Close();
-    }
-
-    /// <summary>
-    /// Reads the current auto-start registration. The checkbox reflects Windows rather
-    /// than a stored preference, so it cannot claim a state the system does not have.
-    /// </summary>
-    private void LoadAutoStartState()
-    {
-        bool enabled = false;
-        try
-        {
-            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(AutoStartPolicy.RunKeyPath))
-            {
-                if (key != null)
-                    enabled = key.GetValue(AutoStartPolicy.ValueName) != null;
-            }
-        }
-        catch (Exception ex)
-        {
-            Log("读取开机自启设置失败: " + ex.Message);
-        }
-
-        // Assigning Checked fires the handler; suppress the write it would perform.
-        suppressAutoStartWrite = true;
-        autoStartCheck.Checked = enabled;
-        suppressAutoStartWrite = false;
-    }
-
-    /// <summary>Whether the checkbox handler should skip writing, used during load.</summary>
-    private bool suppressAutoStartWrite;
-
-    private void AutoStartCheckChanged(object sender, EventArgs e)
-    {
-        if (suppressAutoStartWrite)
-            return;
-        ApplyAutoStart(autoStartCheck.Checked);
-    }
-
-    /// <summary>
-    /// Writes or removes the HKCU Run entry. Nothing here needs administrator rights,
-    /// which is the whole reason the entry is per-user.
-    /// </summary>
-    private void ApplyAutoStart(bool enabled)
-    {
-        try
-        {
-            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(AutoStartPolicy.RunKeyPath))
-            {
-                if (key == null)
-                    throw new InvalidOperationException("无法打开注册表启动项。");
-
-                if (enabled)
-                {
-                    string command = AutoStartPolicy.BuildCommand(Application.ExecutablePath);
-                    key.SetValue(AutoStartPolicy.ValueName, command, RegistryValueKind.String);
-                    Log("已设置开机自动启动：" + command);
-                }
-                else
-                {
-                    key.DeleteValue(AutoStartPolicy.ValueName, false);
-                    Log("已取消开机自动启动。");
-                }
-            }
-            SaveSetting("autoStart", enabled ? "true" : "false");
-
-            // Keep the control in step with what actually happened. Without this the
-            // success path left the checkbox and the registry entry able to disagree,
-            // for example when this is reached from somewhere other than the checkbox.
-            suppressAutoStartWrite = true;
-            autoStartCheck.Checked = enabled;
-            suppressAutoStartWrite = false;
-        }
-        catch (Exception ex)
-        {
-            Log("设置开机自启失败: " + ex.Message);
-            MessageBox.Show(
-                this,
-                "无法修改开机自启设置：" + Environment.NewLine + ex.Message,
-                "DeepSeek Harness",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            // Put the checkbox back so it never shows a state that was not applied.
-            suppressAutoStartWrite = true;
-            autoStartCheck.Checked = !enabled;
-            suppressAutoStartWrite = false;
-        }
     }
 
 
@@ -2273,10 +2105,9 @@ public sealed class ManagerForm : Form
 
         var infoPanel = new TableLayoutPanel();
         infoPanel.Dock = DockStyle.Fill;
-        infoPanel.ColumnCount = 3;
+        infoPanel.ColumnCount = 2;
         infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         infoPanel.Controls.Add(new Label { Text = "Harness 版本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         versionLabel.Dock = DockStyle.Fill;
         versionLabel.TextAlign = ContentAlignment.MiddleLeft;
@@ -2287,12 +2118,6 @@ public sealed class ManagerForm : Form
         // update hint is the longest text this label ever shows.
         versionLabel.MinimumSize = new Size(260, 0);
         infoPanel.Controls.Add(versionLabel, 1, 0);
-        // The auto-start switch lives on this row, which had spare width.
-        autoStartCheck.Text = TrayClosePolicy.MenuAutoStart;
-        autoStartCheck.Dock = DockStyle.Fill;
-        autoStartCheck.TextAlign = ContentAlignment.MiddleLeft;
-        autoStartCheck.CheckedChanged += AutoStartCheckChanged;
-        infoPanel.Controls.Add(autoStartCheck, 2, 0);
         main.Controls.Add(infoPanel, 0, 3);
 
         var buttons = new FlowLayoutPanel();
@@ -4772,12 +4597,9 @@ public sealed class ManagerForm : Form
         var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(SettingsFile))
         {
-            foreach (string existing in new[] { "installRoot", "autoStart" })
-            {
-                string current = ReadJsonValue(File.ReadAllText(SettingsFile), existing);
-                if (!String.IsNullOrEmpty(current))
-                    settings[existing] = current;
-            }
+            string current = ReadJsonValue(File.ReadAllText(SettingsFile), "installRoot");
+            if (!String.IsNullOrEmpty(current))
+                settings["installRoot"] = current;
         }
         settings[key] = value ?? "";
 
@@ -5147,14 +4969,12 @@ public static class Program
     private const string MutexName = @"Local\DeepSeekHarnessControlPanel.SingleInstance";
 
     [STAThread]
-    public static void Main(string[] arguments)
+    public static void Main()
     {
         // Install the safety net first: every later feature runs inside a panel that
         // must never disappear silently.
         Application.ThreadException += OnThreadException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
-
-        bool startHidden = AutoStartPolicy.IsTrayStart(arguments);
 
         bool createdNew;
         using (var instanceGate = new Mutex(true, MutexName, out createdNew))
@@ -5167,7 +4987,7 @@ public static class Program
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new ManagerForm(startHidden));
+            Application.Run(new ManagerForm());
         }
     }
 
