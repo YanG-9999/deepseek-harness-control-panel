@@ -16,6 +16,7 @@ public static class PanelVersionPolicyTests
         VerifyNumericConversion();
         VerifyNumericRejections();
         VerifyPackageName();
+        VerifyHarnessVersionDisplay();
         Console.WriteLine("Panel version policy tests passed.");
     }
 
@@ -85,6 +86,40 @@ public static class PanelVersionPolicyTests
 
         AssertThrows("blank package version", delegate { PanelVersionPolicy.BuildInstallerFileName(""); });
         AssertThrows("null package version", delegate { PanelVersionPolicy.BuildInstallerFileName(null); });
+    }
+
+    /// <summary>
+    /// The row labelled "Harness 版本" must show a version number and nothing else.
+    /// It previously carried the update-check result, which overwrote the version with
+    /// "already up to date" exactly when the user wanted to read the version.
+    /// </summary>
+    private static void VerifyHarnessVersionDisplay()
+    {
+        if (HarnessVersionText.ForDisplay("0.1.5-rc.2") != "v0.1.5-rc.2")
+            throw new InvalidOperationException("The installed version must be shown with a leading v.");
+        if (HarnessVersionText.ForDisplay("0.1.5") != "v0.1.5")
+            throw new InvalidOperationException("A release version must be shown with a leading v.");
+        if (HarnessVersionText.ForDisplay("  0.1.5-rc.2  ") != "v0.1.5-rc.2")
+            throw new InvalidOperationException("Surrounding whitespace must be trimmed.");
+
+        // Never double the prefix if a future source already carries one.
+        if (HarnessVersionText.ForDisplay("v0.1.5") != "v0.1.5")
+            throw new InvalidOperationException("An existing v prefix must not be doubled.");
+        if (HarnessVersionText.ForDisplay("V0.1.5") != "V0.1.5")
+            throw new InvalidOperationException("An existing uppercase prefix must not be doubled.");
+
+        // An unknown version must read as blank, never as a made-up version number.
+        if (HarnessVersionText.ForDisplay("") != "" || HarnessVersionText.ForDisplay(null) != "")
+            throw new InvalidOperationException("An unknown version must be blank.");
+        if (HarnessVersionText.ForDisplay("   ") != "")
+            throw new InvalidOperationException("A whitespace version must be blank.");
+        if (HarnessVersionText.ForDisplay("未知") != "v未知")
+            throw new InvalidOperationException("A non-empty placeholder still gets the prefix; callers pass blank instead.");
+
+        // The update hint and the version must not share a field: the status line is
+        // where the hint belongs.
+        if (HarnessVersionText.ForDisplay("0.1.5-rc.2").IndexOf("最新", StringComparison.Ordinal) >= 0)
+            throw new InvalidOperationException("The version display must not contain update wording.");
     }
 
     private static void AssertThrows(string label, Action action)

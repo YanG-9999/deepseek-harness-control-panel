@@ -1163,6 +1163,29 @@ public static class TrayClosePolicy
 }
 
 /// <summary>
+/// How the installed Harness version is shown. The panel displays a bare version number
+/// with a leading v, while the value it reads from package.json has no prefix.
+/// </summary>
+public static class HarnessVersionText
+{
+    /// <summary>
+    /// The display form, or an empty string when the version is unknown. An unknown
+    /// version is left blank rather than shown as "v未知", which would look like a
+    /// version number that does not exist.
+    /// </summary>
+    public static string ForDisplay(string version)
+    {
+        if (String.IsNullOrWhiteSpace(version))
+            return "";
+        string trimmed = version.Trim();
+        // Never double the prefix if a future source already carries one.
+        if (trimmed.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+            return trimmed;
+        return "v" + trimmed;
+    }
+}
+
+/// <summary>
 /// The port Harness listens on. It used to be the literal 3080 in sixteen places,
 /// which meant changing it required editing every message, probe, and URL as well.
 /// </summary>
@@ -1773,9 +1796,7 @@ public sealed class ManagerForm : Form
     private readonly Button rescanButton = new Button();
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
-    private readonly Button browseButton = new Button();
-    private readonly TextBox portBox = new TextBox();
-    private readonly TextBox logSearchBox = new TextBox();
+    private readonly TextBox portBox = new TextBox();    private readonly TextBox logSearchBox = new TextBox();
     private readonly Button logFindNextButton = new Button();
     private readonly Button logFindPreviousButton = new Button();
     private readonly Button logExportButton = new Button();
@@ -2138,6 +2159,13 @@ public sealed class ManagerForm : Form
         }
     }
 
+    /// <summary>
+    /// Records the outcome of the automatic update check for the status line.
+    ///
+    /// Kept apart from the version label: that label reports which version is installed,
+    /// and overwriting it with "already up to date" hid the version precisely when the
+    /// user wanted to know it.
+    /// </summary>
     private void ShowUpdateStatus(string message)
     {
         if (InvokeRequired)
@@ -2145,8 +2173,14 @@ public sealed class ManagerForm : Form
             BeginInvoke((Action)delegate { ShowUpdateStatus(message); });
             return;
         }
-        versionLabel.Text = message;
+        updateStatus = message;
+        // Re-apply the status line so the hint appears without waiting for a poll.
+        if (lastSnapshot != null)
+            ApplySnapshot(lastSnapshot);
     }
+
+    /// <summary>The latest update-check hint, or empty when there is nothing to say.</summary>
+    private string updateStatus = "";
 
     private void BuildUi()
     {
@@ -2167,10 +2201,9 @@ public sealed class ManagerForm : Form
 
         var pathPanel = new TableLayoutPanel();
         pathPanel.Dock = DockStyle.Fill;
-        pathPanel.ColumnCount = 5;
+        pathPanel.ColumnCount = 4;
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         var pathLabel = new Label { Text = "安装目录", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
@@ -2182,23 +2215,16 @@ public sealed class ManagerForm : Form
         pathBox.MinimumSize = new Size(200, 0);
         pathPanel.Controls.Add(pathLabel, 0, 0);
         pathPanel.Controls.Add(pathBox, 1, 0);
-        AddButton(pathPanel, browseButton, "浏览", BrowseClick);
-        // AddButton sets AutoSize; a filling cell needs the opposite.
-        browseButton.Dock = DockStyle.Fill;
-        browseButton.AutoSize = false;
-        pathPanel.Controls.Add(browseButton, 2, 0);
         // The port lives on this row so the panel keeps its six-row height.
         var portLabel = new Label { Text = "端口", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
-        pathPanel.Controls.Add(portLabel, 3, 0);
+        pathPanel.Controls.Add(portLabel, 2, 0);
         portBox.Dock = DockStyle.Fill;
         portBox.TextAlign = HorizontalAlignment.Center;
         portBox.MaxLength = 5;
-        // Show the port that is actually configured, not the default: displaying the
-        // constant here hid every configured value and made the box look unchanged.
         portBox.Text = configuredPort.ToString();
         portBox.Validating += PortBoxValidating;
         portBox.Validated += PortBoxValidated;
-        pathPanel.Controls.Add(portBox, 4, 0);
+        pathPanel.Controls.Add(portBox, 3, 0);
         main.Controls.Add(pathPanel, 0, 0);
 
         var statePanel = new TableLayoutPanel();
@@ -2623,24 +2649,6 @@ public sealed class ManagerForm : Form
         UpdateLogMatchLabel(0);
     }
 
-    private void BrowseClick(object sender, EventArgs e)
-    {        if (IsConfiguredRoot())
-        {
-            MessageBox.Show(this, "Harness 已安装，安装目录已经锁定。如需更换目录，请使用迁移或重新安装流程。", "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        using (var dialog = new FolderBrowserDialog())
-        {
-            dialog.SelectedPath = Directory.Exists(Root) ? Root : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            dialog.Description = "选择 DeepSeek Harness 的安装目录";
-            if (dialog.ShowDialog(this) == DialogResult.OK)
-            {
-                pathBox.Text = dialog.SelectedPath;
-                RefreshState();
-            }
-        }
-    }
-
     /// <summary>
     /// Whether a click on an action button should cancel the running operation instead
     /// of starting a new one. The install and update buttons are the visible cancel
@@ -2989,7 +2997,6 @@ public sealed class ManagerForm : Form
         rescanButton.Enabled = false;
         openFolderButton.Enabled = false;
         uninstallButton.Enabled = false;
-        browseButton.Enabled = false;
 
         if (cancellable)
         {
@@ -3016,8 +3023,6 @@ public sealed class ManagerForm : Form
         rescanButton.Enabled = true;
         openFolderButton.Enabled = Directory.Exists(Root);
         uninstallButton.Enabled = snapshot.Installed && !snapshot.MultipleInstalls;
-        // Choosing a directory only matters before an install locks it in.
-        browseButton.Enabled = !snapshot.Installed && !snapshot.MultipleInstalls;
     }
 
     private void Log(string message)
@@ -3111,10 +3116,16 @@ public sealed class ManagerForm : Form
     /// <summary>Applies a snapshot to the three state labels.</summary>
     private void ApplySnapshot(HarnessStatusSnapshot snapshot)
     {
-        statusLabel.Text = snapshot.StatusText;
+        // The status line carries the update hint as a suffix, so the version label can
+        // stay a plain version number.
+        statusLabel.Text = String.IsNullOrEmpty(updateStatus)
+            ? snapshot.StatusText
+            : snapshot.StatusText + "  ·  " + updateStatus;
         runningLabel.Text = snapshot.RunningText;
         // The version is only meaningful for a single resolved install.
-        versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls ? snapshot.Version : "";
+        versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls
+            ? HarnessVersionText.ForDisplay(snapshot.Version)
+            : "";
 
         // The tray tooltip is the only state information visible while the window is
         // hidden, so it tracks the same snapshot.

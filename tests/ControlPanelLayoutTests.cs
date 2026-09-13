@@ -17,9 +17,32 @@ public static class ControlPanelLayoutTests
             if (buttons.Controls.Count != 9)
                 throw new InvalidOperationException("Expected 9 action buttons, got " + buttons.Controls.Count + ".");
 
-            VerifyBrowseButtonExists(form);
+            VerifyInstallDirectoryRow(form);
             VerifyLogToolbarExists(form);
+            VerifyVersionRowExists(form);
         }
+    }
+
+    /// <summary>
+    /// The version row shows the installed version and the auto-start switch. The version
+    /// must be a version number: it used to be overwritten by the update-check result.
+    /// </summary>
+    private static void VerifyVersionRowExists(Control form)
+    {
+        TableLayoutPanel row = FindRowContainingLabel(form, "Harness 版本");
+        if (row == null)
+            throw new InvalidOperationException("The version row was not found.");
+        if (row.Controls.Count != 3)
+            throw new InvalidOperationException(
+                "The version row must hold the label, the version, and the auto-start switch, got " + row.Controls.Count + ".");
+
+        bool hasCheckBox = false;
+        foreach (Control child in row.Controls)
+        {
+            if (child is CheckBox) hasCheckBox = true;
+        }
+        if (!hasCheckBox)
+            throw new InvalidOperationException("The auto-start switch belongs on the version row.");
     }
 
     /// <summary>
@@ -83,30 +106,57 @@ public static class ControlPanelLayoutTests
     /// inherited, and this test never shows the form, so every control (including the
     /// form) reports false. Reachability is confirmed by driving the real window.
     /// </summary>
-    private static void VerifyBrowseButtonExists(Control form)
+    /// <summary>
+    /// The install-directory row must carry the path, the port label, and the port box.
+    ///
+    /// The browse button was removed deliberately: the directory can only be chosen
+    /// before an install, and the install flow already opens its own folder picker, so a
+    /// second button on the row was either disabled or redundant.
+    /// </summary>
+    private static void VerifyInstallDirectoryRow(Control form)
     {
-        Button browse = FindButtonByText(form, "浏览");
-        if (browse == null)
-            throw new InvalidOperationException("The install-directory row needs a reachable browse button.");
-        if (browse.Width <= 0 || browse.Height <= 0)
-            throw new InvalidOperationException(
-                "The browse button must be laid out with a usable size, got " + browse.Size + ".");
-
-        // It must sit on the install-directory row, which also carries the port control.
-        TableLayoutPanel row = browse.Parent as TableLayoutPanel;
+        TableLayoutPanel row = FindRowContainingLabel(form, "安装目录");
         if (row == null)
-            throw new InvalidOperationException("The browse button must live in the install-directory row.");
-        if (row.Controls.Count != 5)
+            throw new InvalidOperationException("The install-directory row was not found.");
+        if (row.Controls.Count != 4)
             throw new InvalidOperationException(
-                "The install-directory row must hold its label, the path, the browse button, and the port label and box, got " +
+                "The install-directory row must hold the label, the path, the port label, and the port box, got " +
                 row.Controls.Count + ".");
 
-        // The row centres its controls vertically, which clears the anchor; assert the
-        // button still occupies its own cell rather than stretching across the row.
-        if (row.GetColumn(browse) != 2)
-            throw new InvalidOperationException("The browse button must sit in its own column.");
-        if (browse.Anchor != AnchorStyles.None)
-            throw new InvalidOperationException("The browse button must be centred in its cell, not stretched.");
+        if (FindButtonByText(form, "浏览") != null)
+            throw new InvalidOperationException(
+                "The browse button was removed on purpose; the install flow owns directory selection.");
+
+        TextBox portBox = null;
+        foreach (Control child in row.Controls)
+        {
+            var box = child as TextBox;
+            if (box != null) portBox = box;
+        }
+        if (portBox == null)
+            throw new InvalidOperationException("The install-directory row needs the port box.");
+
+        int port;
+        if (!Int32.TryParse(portBox.Text, out port) || !HarnessPortPolicy.IsValid(port))
+            throw new InvalidOperationException(
+                "The port box must show a usable port, got '" + portBox.Text + "'.");
+    }
+
+    /// <summary>Finds the table that contains a label with the given text.</summary>
+    private static TableLayoutPanel FindRowContainingLabel(Control parent, string text)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            var label = child as Label;
+            if (label != null && String.Equals(label.Text, text, StringComparison.Ordinal))
+            {
+                var row = label.Parent as TableLayoutPanel;
+                if (row != null) return row;
+            }
+            TableLayoutPanel nested = FindRowContainingLabel(child, text);
+            if (nested != null) return nested;
+        }
+        return null;
     }
 
     private static Button FindButtonByText(Control parent, string text)
