@@ -30,7 +30,7 @@ public static class ControlPanelLayoutTests
     private static void VerifyLogToolbarExists(Control form)
     {
         if (FindTextBox(form) == null)
-            throw new InvalidOperationException("The log needs a search box.");
+            throw new InvalidOperationException("The log needs a search box (and the port needs a box).");
 
         foreach (string label in new[] { "下一个", "上一个", "导出日志", "清空" })
         {
@@ -92,12 +92,14 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException(
                 "The browse button must be laid out with a usable size, got " + browse.Size + ".");
 
-        // It must sit on the install-directory row, not in the action button panel.
+        // It must sit on the install-directory row, which also carries the port control.
         TableLayoutPanel row = browse.Parent as TableLayoutPanel;
         if (row == null)
             throw new InvalidOperationException("The browse button must live in the install-directory row.");
-        if (row.Controls.Count != 3)
-            throw new InvalidOperationException("The install-directory row must hold a label, the path, and the browse button.");
+        if (row.Controls.Count != 5)
+            throw new InvalidOperationException(
+                "The install-directory row must hold its label, the path, the browse button, and the port label and box, got " +
+                row.Controls.Count + ".");
         if (browse.Dock != DockStyle.Fill)
             throw new InvalidOperationException("The browse button must fill its column, not auto-size past it.");
     }

@@ -63,7 +63,7 @@ public static class SingleInstancePolicyTests
     private static void VerifyMessageMentionsTheConsequence()
     {
         // The message must explain why a second launch is refused, not just that it is.
-        string message = SingleInstancePolicy.AlreadyRunningMessage;
+        string message = SingleInstancePolicy.BuildAlreadyRunningMessage(HarnessPortPolicy.DefaultPort);
         if (message.IndexOf("3080", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The message must name the shared resource at stake.");
         if (message.IndexOf("覆盖", StringComparison.Ordinal) < 0)

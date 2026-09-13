@@ -599,6 +599,15 @@ public static class HarnessStartupPolicy
     public const string BuiltCliRelativePath = "apps\\cli\\lib\\bin.js";
     public const string WebArguments = "web --no-open";
 
+    /// <summary>
+    /// The web launch arguments for a given port. The port is appended to the fixed
+    /// arguments so the panel and Harness agree on where the service lives.
+    /// </summary>
+    public static string BuildWebArguments(int port)
+    {
+        return WebArguments + " " + HarnessPortPolicy.BuildPortArgument(port);
+    }
+
     public static HarnessLaunchMode SelectLaunchMode(bool builtCliExists)
     {
         return builtCliExists ? HarnessLaunchMode.BuiltCli : HarnessLaunchMode.SourceFallback;
@@ -946,12 +955,93 @@ public static class SingleInstancePolicy
     }
 
     /// <summary>
-    /// Shown when a second launch finds the first one already running.
+    /// Shown when a second launch finds the first one already running. Takes the port
+    /// because the message names the shared resource at stake.
     /// </summary>
-    public const string AlreadyRunningMessage =
-        "DeepSeek Harness 控制面板已经在运行。\r\n\r\n" +
-        "同一个面板不能重复启动：两个实例会同时管理 3080 端口和安装状态，导致状态彼此覆盖。\r\n" +
-        "已为你切换到正在运行的窗口。";
+    public static string BuildAlreadyRunningMessage(int port)
+    {
+        return "DeepSeek Harness 控制面板已经在运行。\r\n\r\n" +
+            "同一个面板不能重复启动：两个实例会同时管理 " + port + " 端口和安装状态，导致状态彼此覆盖。\r\n" +
+            "已为你切换到正在运行的窗口。";
+    }
+}
+
+/// <summary>
+/// The port Harness listens on. It used to be the literal 3080 in sixteen places,
+/// which meant changing it required editing every message, probe, and URL as well.
+/// </summary>
+public static class HarnessPortPolicy
+{
+    /// <summary>The port the panel uses when nothing else is configured.</summary>
+    public const int DefaultPort = 3080;
+
+    /// <summary>Ports below this are privileged and would need elevation.</summary>
+    public const int MinimumPort = 1024;
+    public const int MaximumPort = 65535;
+
+    /// <summary>
+    /// Whether a port can be used. Ports under 1024 are rejected on purpose: binding
+    /// one requires an elevated process, and the panel deliberately installs per-user
+    /// without ever asking for administrator rights.
+    /// </summary>
+    public static bool IsValid(int port)
+    {
+        return port >= MinimumPort && port <= MaximumPort;
+    }
+
+    /// <summary>
+    /// Parses a user-typed port. Returns false rather than throwing so a dialog can
+    /// report the problem in its own words.
+    /// </summary>
+    public static bool TryParse(string text, out int port, out string error)
+    {
+        port = DefaultPort;
+        error = "";
+        string candidate = (text ?? "").Trim();
+        if (candidate.Length == 0)
+        {
+            error = "端口不能为空。";
+            return false;
+        }
+
+        int parsed;
+        if (!Int32.TryParse(candidate, out parsed))
+        {
+            error = "端口必须是数字。";
+            return false;
+        }
+        if (parsed < MinimumPort || parsed > MaximumPort)
+        {
+            error = "端口需要在 " + MinimumPort + " 到 " + MaximumPort + " 之间。" +
+                Environment.NewLine +
+                "小于 " + MinimumPort + " 的端口需要管理员权限，控制面板不会为此请求提权。";
+            return false;
+        }
+        port = parsed;
+        return true;
+    }
+
+    /// <summary>
+    /// The local web address for a port, used for the readiness probe and as the
+    /// fallback address when the official ready line has not arrived.
+    /// </summary>
+    public static string BuildLocalWebUri(int port)
+    {
+        if (!IsValid(port))
+            throw new ArgumentOutOfRangeException("port");
+        return "http://127.0.0.1:" + port + "/";
+    }
+
+    /// <summary>
+    /// The extra argument that makes Harness listen on a chosen port. Passed through
+    /// to the web launch alongside the existing --no-open.
+    /// </summary>
+    public static string BuildPortArgument(int port)
+    {
+        if (!IsValid(port))
+            throw new ArgumentOutOfRangeException("port");
+        return "--port " + port;
+    }
 }
 
 /// <summary>
@@ -1239,7 +1329,7 @@ public static class HarnessStatusChangePolicy
     /// A description of the transition, or an empty string when nothing changed.
     /// The wording names both sides so the log reads as an event, not a state dump.
     /// </summary>
-    public static string DescribeChange(HarnessStatusSnapshot previous, HarnessStatusSnapshot current)
+    public static string DescribeChange(int port, HarnessStatusSnapshot previous, HarnessStatusSnapshot current)
     {
         if (previous == null || current == null)
             return "";
@@ -1248,17 +1338,17 @@ public static class HarnessStatusChangePolicy
         if (previous.Running && !current.Running)
         {
             if (current.PortBusy)
-                return "Harness 已停止，但 3080 端口仍被其他程序占用。";
-            return "Harness 进程已退出，服务不再监听 3080。";
+                return "Harness 已停止，但 " + port + " 端口仍被其他程序占用。";
+            return "Harness 进程已退出，服务不再监听 " + port + "。";
         }
         if (!previous.Running && current.Running)
             return "检测到 Harness 已开始运行。";
 
         // The port changing hands while Harness is not the listener.
         if (!previous.PortBusy && current.PortBusy && !current.Running)
-            return "3080 端口被其他程序占用。";
+            return port + " 端口被其他程序占用。";
         if (previous.PortBusy && !current.PortBusy && !current.Running)
-            return "3080 端口已被释放。";
+            return port + " 端口已被释放。";
 
         if (!previous.Installed && current.Installed)
             return "检测到 Harness 安装。";
@@ -1281,12 +1371,12 @@ public static class HarnessStatusChangePolicy
 }
 
 public static class HarnessLifecyclePolicy
-{    public const int StartupTimeoutSeconds = 120;
+{
+    public const int StartupTimeoutSeconds = 120;
     public const int StopTimeoutMilliseconds = 30000;
     public const int PollIntervalMilliseconds = 250;
     public const int EndpointProbeIntervalMilliseconds = 1000;
     public const int EndpointProbeTimeoutMilliseconds = 3000;
-    public const string LocalWebUri = "http://127.0.0.1:3080/";
 
     /// <summary>
     /// How often the panel re-checks whether Harness is still running. Three seconds
@@ -1314,10 +1404,10 @@ public static class HarnessLifecyclePolicy
         return Math.Max(1, timeoutMilliseconds / pollIntervalMilliseconds);
     }
 
-    public static string StartupFailureMessage(bool portObserved, bool endpointObserved)
+    public static string StartupFailureMessage(int port, bool portObserved, bool endpointObserved)
     {
         if (!portObserved)
-            return "Harness 服务尚未监听 3080 端口。请检查日志中的 Node.js、依赖或端口占用错误。";
+            return "Harness 服务尚未监听 " + port + " 端口。请检查日志中的 Node.js、依赖或端口占用错误。";
         if (!endpointObserved)
             return "Harness 端口已监听，但页面尚未可访问。通常是 Harness 或插件仍在初始化，请检查日志中的错误。";
         return "Harness 页面已响应，但启动进程未能保持运行。请检查日志中的退出原因。";
@@ -1482,6 +1572,7 @@ public sealed class ManagerForm : Form
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
     private readonly Button browseButton = new Button();
+    private readonly TextBox portBox = new TextBox();
     private readonly TextBox logSearchBox = new TextBox();
     private readonly Button logFindNextButton = new Button();
     private readonly Button logFindPreviousButton = new Button();
@@ -1553,6 +1644,10 @@ public sealed class ManagerForm : Form
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
         http.Timeout = TimeSpan.FromMinutes(20);
+
+        // Load the configured port before the UI is built, because the port box is
+        // populated from it during layout.
+        configuredPort = LoadConfiguredPort();
 
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
@@ -1639,10 +1734,12 @@ public sealed class ManagerForm : Form
 
         var pathPanel = new TableLayoutPanel();
         pathPanel.Dock = DockStyle.Fill;
-        pathPanel.ColumnCount = 3;
+        pathPanel.ColumnCount = 5;
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
+        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
+        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         var pathLabel = new Label { Text = "安装目录", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
         pathBox.Dock = DockStyle.Fill;
         pathBox.TextAlign = ContentAlignment.MiddleLeft;
@@ -1654,6 +1751,18 @@ public sealed class ManagerForm : Form
         browseButton.Dock = DockStyle.Fill;
         browseButton.AutoSize = false;
         pathPanel.Controls.Add(browseButton, 2, 0);
+        // The port lives on this row so the panel keeps its six-row height.
+        var portLabel = new Label { Text = "端口", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
+        pathPanel.Controls.Add(portLabel, 3, 0);
+        portBox.Dock = DockStyle.Fill;
+        portBox.TextAlign = HorizontalAlignment.Center;
+        portBox.MaxLength = 5;
+        // Show the port that is actually configured, not the default: displaying the
+        // constant here hid every configured value and made the box look unchanged.
+        portBox.Text = configuredPort.ToString();
+        portBox.Validating += PortBoxValidating;
+        portBox.Validated += PortBoxValidated;
+        pathPanel.Controls.Add(portBox, 4, 0);
         main.Controls.Add(pathPanel, 0, 0);
 
         var statePanel = new TableLayoutPanel();
@@ -1751,6 +1860,53 @@ public sealed class ManagerForm : Form
         button.Height = 30;
         button.Click += handler;
         parent.Controls.Add(button);
+    }
+
+    /// <summary>
+    /// Rejects an unusable port before it is saved. Leaving the box in an invalid state
+    /// would let the panel launch Harness on a port it cannot then probe.
+    /// </summary>
+    private void PortBoxValidating(object sender, System.ComponentModel.CancelEventArgs e)
+    {
+        int port;
+        string error;
+        if (HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
+            return;
+
+        e.Cancel = true;
+        MessageBox.Show(this, error, "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// Persists a changed port. The running service is not moved: a port change takes
+    /// effect on the next start, which the log states plainly.
+    /// </summary>
+    private void PortBoxValidated(object sender, EventArgs e)
+    {
+        int port;
+        string error;
+        if (!HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
+        {
+            portBox.Text = Port.ToString();
+            return;
+        }
+        if (port == configuredPort)
+            return;
+
+        int previous = configuredPort;
+        configuredPort = port;
+        try
+        {
+            SaveSetting("harnessPort", port.ToString());
+        }
+        catch (Exception ex)
+        {
+            Log("保存端口设置失败: " + ex.Message);
+        }
+        Log("监听端口已从 " + previous + " 改为 " + port + "（下次启动生效）。");
+        if (lastSnapshot != null && lastSnapshot.Running)
+            Log("Harness 当前仍在 " + previous + " 端口运行；点击“重启”后才会切换。");
+        RefreshState();
     }
 
     private string DefaultInstallRoot()
@@ -1935,8 +2091,7 @@ public sealed class ManagerForm : Form
     }
 
     private void BrowseClick(object sender, EventArgs e)
-    {
-        if (IsConfiguredRoot())
+    {        if (IsConfiguredRoot())
         {
             MessageBox.Show(this, "Harness 已安装，安装目录已经锁定。如需更换目录，请使用迁移或重新安装流程。", "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -2408,8 +2563,8 @@ public sealed class ManagerForm : Form
     {
         bool installed = IsInstalled();
         bool ready = installed && IsInstallationReady();
-        bool portBusy = IsPortOpen(3080);
-        int portPid = portBusy ? FindPortOwner(3080) : 0;
+        bool portBusy = IsPortOpen(Port);
+        int portPid = portBusy ? FindPortOwner(Port) : 0;
         bool running = portBusy && portPid > 0 && IsLikelyHarnessProcess(portPid);
         return new HarnessStatusSnapshot(
             installed,
@@ -2439,7 +2594,7 @@ public sealed class ManagerForm : Form
         if (busy)
             return;
         HarnessStatusSnapshot current = ComputeStatusSnapshot();
-        string change = HarnessStatusChangePolicy.DescribeChange(lastSnapshot, current);
+        string change = HarnessStatusChangePolicy.DescribeChange(Port, lastSnapshot, current);
         // Only touch the labels when something actually changed: re-applying an
         // unchanged snapshot every few seconds would overwrite the update-available
         // hint with the plain version.
@@ -2598,9 +2753,9 @@ public sealed class ManagerForm : Form
         selectedSourceCommit = LocalCommit();
         await EnsureNodeAsync();
         LogProfileStartupHint();
-        if (IsPortOpen(3080))
+        if (IsPortOpen(Port))
         {
-            int owner = FindPortOwner(3080);
+            int owner = FindPortOwner(Port);
             if (owner > 0 && IsLikelyHarnessProcess(owner))
             {
                 string existingUrl = StoredWebUrl();
@@ -2613,7 +2768,7 @@ public sealed class ManagerForm : Form
                 }
                 return;
             }
-            throw new InvalidOperationException("3080 端口正被其他程序占用，请先释放端口后再启动 Harness。");
+            throw new InvalidOperationException(Port + " 端口正被其他程序占用，请先释放端口后再启动 Harness。");
         }
         Stopwatch startupTime = Stopwatch.StartNew();
         TaskCompletionSource<string> webReady = new TaskCompletionSource<string>();
@@ -2623,7 +2778,7 @@ public sealed class ManagerForm : Form
         {
             if (String.IsNullOrEmpty(e.Data))
                 return;
-            string readyUrl = HarnessStartupPolicy.GetWebReadyUrl(e.Data, 3080);
+            string readyUrl = HarnessStartupPolicy.GetWebReadyUrl(e.Data, Port);
             if (!String.IsNullOrEmpty(readyUrl))
             {
                 Log(HarnessStartupPolicy.RedactWebToken(e.Data));
@@ -2645,7 +2800,7 @@ public sealed class ManagerForm : Form
         int endpointProbeEvery = HarnessLifecyclePolicy.EndpointProbeIntervalMilliseconds / HarnessLifecyclePolicy.PollIntervalMilliseconds;
         for (int i = 0; i < HarnessLifecyclePolicy.StartupTimeoutSeconds * 1000 / HarnessLifecyclePolicy.PollIntervalMilliseconds; i++)
         {
-            bool portOpen = IsPortOpen(3080);
+            bool portOpen = IsPortOpen(Port);
             if (!portObserved && portOpen)
             {
                 portObserved = true;
@@ -2661,7 +2816,7 @@ public sealed class ManagerForm : Form
             if (HarnessLifecyclePolicy.IsStartupReady(!server.HasExited, portOpen, endpointObserved, officialReadyLog))
             {
                 startupTime.Stop();
-                string readyUrl = officialReadyLog ? webReady.Task.Result : HarnessLifecyclePolicy.LocalWebUri;
+                string readyUrl = officialReadyLog ? webReady.Task.Result : HarnessPortPolicy.BuildLocalWebUri(Port);
                 WriteState(ReadStateValue("commit"), server.Id.ToString(), readyUrl);
                 Log("Harness 已就绪，用时 " + startupTime.Elapsed.TotalSeconds.ToString("0.0") + " 秒。" +
                     (officialReadyLog ? "已收到官方就绪日志。" : "已通过本地页面验证。"));
@@ -2677,7 +2832,7 @@ public sealed class ManagerForm : Form
             await Task.Delay(HarnessLifecyclePolicy.PollIntervalMilliseconds);
         }
         throw new InvalidOperationException("等待 Harness 完成初始化超过 " + HarnessLifecyclePolicy.StartupTimeoutSeconds + " 秒。" +
-            HarnessLifecyclePolicy.StartupFailureMessage(portObserved, endpointObserved));
+            HarnessLifecyclePolicy.StartupFailureMessage(Port, portObserved, endpointObserved));
     }
 
     private async Task<bool> IsHarnessEndpointReadyAsync()
@@ -2686,7 +2841,7 @@ public sealed class ManagerForm : Form
         {
             using (var cancellation = new CancellationTokenSource(HarnessLifecyclePolicy.EndpointProbeTimeoutMilliseconds))
             using (HttpResponseMessage response = await http.GetAsync(
-                HarnessLifecyclePolicy.LocalWebUri,
+                HarnessPortPolicy.BuildLocalWebUri(Port),
                 HttpCompletionOption.ResponseContentRead,
                 cancellation.Token))
             {
@@ -2747,20 +2902,23 @@ public sealed class ManagerForm : Form
     private async Task<ProcessStartInfo> NewHarnessWebProcessAsync()
     {
         string builtCli = Path.Combine(Source, HarnessStartupPolicy.BuiltCliRelativePath);
+        string arguments = HarnessStartupPolicy.BuildWebArguments(Port);
         if (HarnessStartupPolicy.SelectLaunchMode(File.Exists(builtCli)) == HarnessLaunchMode.BuiltCli)
         {
             Log("启动器：使用已构建 CLI。");
-            return NewNodeProcess(QuoteArgument(builtCli) + " " + HarnessStartupPolicy.WebArguments, Source);
+            Log("监听端口: " + Port + "。");
+            return NewNodeProcess(QuoteArgument(builtCli) + " " + arguments, Source);
         }
         Log("启动器：未找到已构建 CLI，使用兼容启动模式。");
+        Log("监听端口: " + Port + "。");
         await PreparePnpmAsync();
-        return NewPnpmProcess("dsh " + HarnessStartupPolicy.WebArguments, Source);
+        return NewPnpmProcess("dsh " + arguments, Source);
     }
 
     private async Task StopAsync()
     {
         int recordedPid = ParseInt(ReadStateValue("pid"));
-        int portPid = FindPortOwner(3080);
+        int portPid = FindPortOwner(Port);
         bool recordedAlive = recordedPid > 0 && IsProcessAlive(recordedPid);
         bool recordedIsHarness = recordedAlive && IsLikelyHarnessProcess(recordedPid);
         bool portIsHarness = portPid > 0 && IsLikelyHarnessProcess(portPid);
@@ -2775,7 +2933,7 @@ public sealed class ManagerForm : Form
         {
             string commandLine = GetProcessCommandLine(portPid);
             string detail = String.IsNullOrEmpty(commandLine) ? "" : Environment.NewLine + commandLine;
-            throw new InvalidOperationException("3080 端口由其他程序占用，管理器不会结束该进程。" + detail);
+            throw new InvalidOperationException(Port + " 端口由其他程序占用，管理器不会结束该进程。" + detail);
         }
         if (resolution.Kind == StopTargetKind.HarnessProcess)
         {
@@ -2784,17 +2942,17 @@ public sealed class ManagerForm : Form
             WriteState(ReadStateValue("commit"), "", "");
             for (int i = 0; i < HarnessLifecyclePolicy.StopWaitAttempts(
                 HarnessLifecyclePolicy.StopTimeoutMilliseconds,
-                HarnessLifecyclePolicy.PollIntervalMilliseconds) && IsPortOpen(3080); i++)
+                HarnessLifecyclePolicy.PollIntervalMilliseconds) && IsPortOpen(Port); i++)
             {
                 await Task.Delay(HarnessLifecyclePolicy.PollIntervalMilliseconds);
             }
-            if (IsPortOpen(3080))
+            if (IsPortOpen(Port))
             {
-                int remainingPid = FindPortOwner(3080);
-                throw new InvalidOperationException("已等待 30 秒，但 3080 端口仍被占用。" +
+                int remainingPid = FindPortOwner(Port);
+                throw new InvalidOperationException("已等待 30 秒，但 " + Port + " 端口仍被占用。" +
                     (remainingPid > 0 ? "占用进程 PID: " + remainingPid + "。" : ""));
             }
-            Log("已停止 Harness 进程树并释放 3080 端口。");
+            Log("已停止 Harness 进程树并释放 " + Port + " 端口。");
         }
         else
         {
@@ -4047,6 +4205,26 @@ public sealed class ManagerForm : Form
         return DefaultInstallRoot();
     }
 
+    /// <summary>
+    /// The port Harness is launched on. Read once at construction so a change takes
+    /// effect on the next start rather than mid-operation.
+    /// </summary>
+    private int Port { get { return configuredPort; } }
+
+    private int configuredPort = HarnessPortPolicy.DefaultPort;
+
+    private int LoadConfiguredPort()
+    {
+        if (!File.Exists(SettingsFile))
+            return HarnessPortPolicy.DefaultPort;
+        string raw = ReadJsonValue(File.ReadAllText(SettingsFile), "harnessPort");
+        int parsed;
+        if (Int32.TryParse(raw, out parsed) && HarnessPortPolicy.IsValid(parsed))
+            return parsed;
+        // A corrupt or out-of-range value falls back rather than failing to start.
+        return HarnessPortPolicy.DefaultPort;
+    }
+
     private bool IsConfiguredRoot()
     {
         if (!File.Exists(SettingsFile))
@@ -4059,10 +4237,44 @@ public sealed class ManagerForm : Form
                 StringComparison.OrdinalIgnoreCase);
     }
 
-    private void SaveConfiguredRoot(string root)
+    /// <summary>
+    /// Writes one setting without discarding the others. The previous version replaced
+    /// the whole file, so adding a second key would have been silently erased by the
+    /// next install-root write.
+    /// </summary>
+    private void SaveSetting(string key, string value)
     {
         Directory.CreateDirectory(SettingsDirectory);
-        File.WriteAllText(SettingsFile, "{\"installRoot\":\"" + root.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"}");
+        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(SettingsFile))
+        {
+            foreach (string existing in new[] { "installRoot", "harnessPort" })
+            {
+                string current = ReadJsonValue(File.ReadAllText(SettingsFile), existing);
+                if (!String.IsNullOrEmpty(current))
+                    settings[existing] = current;
+            }
+        }
+        settings[key] = value ?? "";
+
+        var builder = new StringBuilder();
+        builder.Append("{");
+        bool first = true;
+        foreach (KeyValuePair<string, string> pair in settings)
+        {
+            if (!first)
+                builder.Append(",");
+            builder.Append("\"").Append(JsonEscape(pair.Key)).Append("\":\"")
+                   .Append(JsonEscape(pair.Value)).Append("\"");
+            first = false;
+        }
+        builder.Append("}");
+        File.WriteAllText(SettingsFile, builder.ToString());
+    }
+
+    private void SaveConfiguredRoot(string root)
+    {
+        SaveSetting("installRoot", root);
     }
 
     private string ReadJsonValue(string json, string key)
@@ -4159,7 +4371,7 @@ public sealed class ManagerForm : Form
     private string StoredWebUrl()
     {
         string value = StateSecretProtection.Unprotect(ReadStateValue("url"));
-        return HarnessStartupPolicy.GetWebReadyUrl("dsh web: " + value, 3080);
+        return HarnessStartupPolicy.GetWebReadyUrl("dsh web: " + value, Port);
     }
 
     private void WriteState(string commit, string pid = null, string url = null)
@@ -4441,7 +4653,7 @@ public static class Program
     {
         bool focused = TryFocusExistingPanel();
         MessageBox.Show(
-            SingleInstancePolicy.AlreadyRunningMessage,
+            SingleInstancePolicy.BuildAlreadyRunningMessage(HarnessPortPolicy.DefaultPort),
             "DeepSeek Harness 控制面板",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);

@@ -83,7 +83,7 @@ public static class HarnessStatusChangePolicyTests
 
     private static void VerifyRunningTransitions()
     {
-        string stopped = HarnessStatusChangePolicy.DescribeChange(
+        string stopped = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, true, true, false, "1.0"),
             Snapshot(true, true, false, false, false, "1.0"));
         if (stopped.IndexOf("已退出", StringComparison.Ordinal) < 0)
@@ -91,7 +91,7 @@ public static class HarnessStatusChangePolicyTests
         if (stopped.IndexOf("3080", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The exit line must name the port that stopped listening.");
 
-        string started = HarnessStatusChangePolicy.DescribeChange(
+        string started = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, false, false, false, "1.0"),
             Snapshot(true, true, true, true, false, "1.0"));
         if (started.IndexOf("已开始运行", StringComparison.Ordinal) < 0)
@@ -100,13 +100,13 @@ public static class HarnessStatusChangePolicyTests
 
     private static void VerifyPortTransitions()
     {
-        string taken = HarnessStatusChangePolicy.DescribeChange(
+        string taken = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, false, false, false, "1.0"),
             Snapshot(true, true, true, false, false, "1.0"));
         if (taken.IndexOf("被其他程序占用", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("A foreign listener must be reported, got: " + taken);
 
-        string freed = HarnessStatusChangePolicy.DescribeChange(
+        string freed = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, true, false, false, "1.0"),
             Snapshot(true, true, false, false, false, "1.0"));
         if (freed.IndexOf("已被释放", StringComparison.Ordinal) < 0)
@@ -115,13 +115,13 @@ public static class HarnessStatusChangePolicyTests
 
     private static void VerifyInstallTransitions()
     {
-        string added = HarnessStatusChangePolicy.DescribeChange(
+        string added = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(false, false, false, false, false, ""),
             Snapshot(true, true, false, false, false, "1.0"));
         if (added.IndexOf("检测到 Harness 安装", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("An install appearing must be reported, got: " + added);
 
-        string removed = HarnessStatusChangePolicy.DescribeChange(
+        string removed = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, false, false, false, "1.0"),
             Snapshot(false, false, false, false, false, ""));
         if (removed.IndexOf("不可用", StringComparison.Ordinal) < 0)
@@ -129,26 +129,26 @@ public static class HarnessStatusChangePolicyTests
 
         // Isolate the readiness change from the running change: DescribeChange
         // reports a process exit first, because that is the more urgent event.
-        string broken = HarnessStatusChangePolicy.DescribeChange(
+        string broken = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, false, false, false, "1.0"),
             Snapshot(true, false, false, false, false, "1.0"));
         if (broken.IndexOf("不再完整", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("An install degrading must be reported, got: " + broken);
 
         // When both change at once, the process lifecycle wins.
-        string exitWins = HarnessStatusChangePolicy.DescribeChange(
+        string exitWins = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, true, true, false, "1.0"),
             Snapshot(true, false, false, false, false, "1.0"));
         if (exitWins.IndexOf("已退出", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("A process exit must take priority over a readiness change, got: " + exitWins);
 
-        string repaired = HarnessStatusChangePolicy.DescribeChange(
+        string repaired = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, false, false, false, false, "1.0"),
             Snapshot(true, true, false, false, false, "1.0"));
         if (repaired.IndexOf("已恢复完整", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("A repair must be reported, got: " + repaired);
 
-        string many = HarnessStatusChangePolicy.DescribeChange(
+        string many = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, false, false, false, "1.0"),
             Snapshot(true, true, false, false, true, "1.0"));
         if (many.IndexOf("多个 Harness 安装", StringComparison.Ordinal) < 0)
@@ -163,19 +163,19 @@ public static class HarnessStatusChangePolicyTests
     private static void VerifyQuietCases()
     {
         HarnessStatusSnapshot steady = Snapshot(true, true, true, true, false, "1.0");
-        string none = HarnessStatusChangePolicy.DescribeChange(steady, Snapshot(true, true, true, true, false, "1.0"));
+        string none = HarnessStatusChangePolicy.DescribeChange(3080, steady, Snapshot(true, true, true, true, false, "1.0"));
         if (none != "")
             throw new InvalidOperationException("An unchanged poll must produce no log line, got: " + none);
 
-        string versionOnly = HarnessStatusChangePolicy.DescribeChange(
+        string versionOnly = HarnessStatusChangePolicy.DescribeChange(3080, 
             Snapshot(true, true, true, true, false, "1.0"),
             Snapshot(true, true, true, true, false, "2.0"));
         if (versionOnly != "")
             throw new InvalidOperationException("A version-only change must not log on its own, got: " + versionOnly);
 
-        if (HarnessStatusChangePolicy.DescribeChange(null, steady) != "")
+        if (HarnessStatusChangePolicy.DescribeChange(3080, null, steady) != "")
             throw new InvalidOperationException("A missing previous snapshot must not log.");
-        if (HarnessStatusChangePolicy.DescribeChange(steady, null) != "")
+        if (HarnessStatusChangePolicy.DescribeChange(3080, steady, null) != "")
             throw new InvalidOperationException("A missing current snapshot must not log.");
     }
 }

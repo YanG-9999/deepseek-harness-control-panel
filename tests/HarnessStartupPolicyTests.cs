@@ -14,7 +14,7 @@ public static class HarnessStartupPolicyTests
             throw new InvalidOperationException("A built Harness CLI should be used for normal startup.");
         if (HarnessStartupPolicy.SelectLaunchMode(false) != HarnessLaunchMode.SourceFallback)
             throw new InvalidOperationException("The source launcher should be used only as a compatibility fallback.");
-        if (HarnessStartupPolicy.WebArguments != "web --no-open")
+        if (!HarnessStartupPolicy.BuildWebArguments(3080).StartsWith("web --no-open", StringComparison.Ordinal))
             throw new InvalidOperationException("Harness must not open a second browser window.");
         if (!HarnessStartupPolicy.IsWebReadyLine("dsh web: http://127.0.0.1:3080", 3080))
             throw new InvalidOperationException("The official ready log should mark the web service ready.");

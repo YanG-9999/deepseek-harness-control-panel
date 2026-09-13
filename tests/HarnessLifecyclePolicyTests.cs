@@ -29,9 +29,9 @@ public static class HarnessLifecyclePolicyTests
             throw new InvalidOperationException("Stopping should wait up to 30 seconds in 250ms intervals.");
         if (HarnessLifecyclePolicy.StopWaitAttempts(1, 250) != 1)
             throw new InvalidOperationException("Stopping should always make at least one readiness check.");
-        if (!HarnessLifecyclePolicy.StartupFailureMessage(false, false).Contains("尚未监听"))
+        if (!HarnessLifecyclePolicy.StartupFailureMessage(3080, false, false).Contains("尚未监听"))
             throw new InvalidOperationException("The no-port startup failure should name the failed stage.");
-        if (!HarnessLifecyclePolicy.StartupFailureMessage(true, false).Contains("页面尚未可访问"))
+        if (!HarnessLifecyclePolicy.StartupFailureMessage(3080, true, false).Contains("页面尚未可访问"))
             throw new InvalidOperationException("The no-page startup failure should name the failed stage.");
         // Printed here, not in Main: the aggregate entry point calls Run() directly.
         Console.WriteLine("Harness lifecycle policy tests passed.");
