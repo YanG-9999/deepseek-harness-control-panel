@@ -107,11 +107,12 @@ public static class ControlPanelLayoutTests
     /// form) reports false. Reachability is confirmed by driving the real window.
     /// </summary>
     /// <summary>
-    /// The install-directory row must carry the path, the port label, and the port box.
+    /// The install-directory row must carry the path and a read-only port.
     ///
-    /// The browse button was removed deliberately: the directory can only be chosen
-    /// before an install, and the install flow already opens its own folder picker, so a
-    /// second button on the row was either disabled or redundant.
+    /// Both the browse button and the port editor were removed deliberately. The
+    /// directory can only be chosen before an install and the install flow already opens
+    /// its own picker; the port follows the Harness default, and an editable box only
+    /// invited a change that would not affect an already-running instance.
     /// </summary>
     private static void VerifyInstallDirectoryRow(Control form)
     {
@@ -120,26 +121,41 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException("The install-directory row was not found.");
         if (row.Controls.Count != 4)
             throw new InvalidOperationException(
-                "The install-directory row must hold the label, the path, the port label, and the port box, got " +
+                "The install-directory row must hold the label, the path, the port label, and the port value, got " +
                 row.Controls.Count + ".");
 
         if (FindButtonByText(form, "浏览") != null)
             throw new InvalidOperationException(
                 "The browse button was removed on purpose; the install flow owns directory selection.");
 
-        TextBox portBox = null;
+        // The port must be shown but not editable.
         foreach (Control child in row.Controls)
         {
-            var box = child as TextBox;
-            if (box != null) portBox = box;
+            if (child is TextBox)
+            {
+                throw new InvalidOperationException(
+                    "The install-directory row must not carry an editable field; the port is display only.");
+            }
         }
-        if (portBox == null)
-            throw new InvalidOperationException("The install-directory row needs the port box.");
 
-        int port;
-        if (!Int32.TryParse(portBox.Text, out port) || !HarnessPortPolicy.IsValid(port))
+        Label portValue = FindLabelByText(row, HarnessPortPolicy.DefaultPort.ToString());
+        if (portValue == null)
             throw new InvalidOperationException(
-                "The port box must show a usable port, got '" + portBox.Text + "'.");
+                "The row must show the port in use, expected '" + HarnessPortPolicy.DefaultPort + "'.");
+    }
+
+    /// <summary>Finds a label with the given text anywhere under the parent.</summary>
+    private static Label FindLabelByText(Control parent, string text)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            var label = child as Label;
+            if (label != null && String.Equals(label.Text, text, StringComparison.Ordinal))
+                return label;
+            Label nested = FindLabelByText(child, text);
+            if (nested != null) return nested;
+        }
+        return null;
     }
 
     /// <summary>Finds the table that contains a label with the given text.</summary>

@@ -1816,7 +1816,10 @@ public sealed class ManagerForm : Form
     private readonly Button rescanButton = new Button();
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
-    private readonly TextBox portBox = new TextBox();    private readonly TextBox logSearchBox = new TextBox();
+    /// <summary>The port in use, shown read-only: the panel follows the Harness default.</summary>
+    private readonly Label portValueLabel = new Label();
+
+    private readonly TextBox logSearchBox = new TextBox();
     private readonly Button logFindNextButton = new Button();
     private readonly Button logFindPreviousButton = new Button();
     private readonly Button logExportButton = new Button();
@@ -1918,10 +1921,6 @@ public sealed class ManagerForm : Form
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
         http.Timeout = TimeSpan.FromMinutes(20);
-
-        // Load the configured port before the UI is built, because the port box is
-        // populated from it during layout.
-        configuredPort = LoadConfiguredPort();
 
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
@@ -2238,16 +2237,16 @@ public sealed class ManagerForm : Form
         pathBox.MinimumSize = new Size(200, 0);
         pathPanel.Controls.Add(pathLabel, 0, 0);
         pathPanel.Controls.Add(pathBox, 1, 0);
-        // The port lives on this row so the panel keeps its six-row height.
+        // The port is shown, not edited: the panel follows the Harness default, so an
+        // editable box only invited a change that would not take effect on a running
+        // instance. The value stays parameterised internally, so adding an entry point
+        // later does not mean re-hard-coding 3080 across the panel.
         var portLabel = new Label { Text = "端口", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
         pathPanel.Controls.Add(portLabel, 2, 0);
-        portBox.Dock = DockStyle.Fill;
-        portBox.TextAlign = HorizontalAlignment.Center;
-        portBox.MaxLength = 5;
-        portBox.Text = configuredPort.ToString();
-        portBox.Validating += PortBoxValidating;
-        portBox.Validated += PortBoxValidated;
-        pathPanel.Controls.Add(portBox, 3, 0);
+        portValueLabel.Dock = DockStyle.Fill;
+        portValueLabel.TextAlign = ContentAlignment.MiddleLeft;
+        portValueLabel.Text = Port.ToString();
+        pathPanel.Controls.Add(portValueLabel, 3, 0);
         main.Controls.Add(pathPanel, 0, 0);
 
         var statePanel = new TableLayoutPanel();
@@ -2445,51 +2444,7 @@ public sealed class ManagerForm : Form
     }
 
     /// <summary>
-    /// Rejects an unusable port before it is saved. Leaving the box in an invalid state
-    /// would let the panel launch Harness on a port it cannot then probe.
-    /// </summary>
-    private void PortBoxValidating(object sender, System.ComponentModel.CancelEventArgs e)
-    {
-        int port;
-        string error;
-        if (HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
-            return;
-
-        e.Cancel = true;
-        MessageBox.Show(this, error, "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-
-    /// <summary>
-    /// Persists a changed port. The running service is not moved: a port change takes
-    /// effect on the next start, which the log states plainly.
-    /// </summary>
-    private void PortBoxValidated(object sender, EventArgs e)
-    {
-        int port;
-        string error;
-        if (!HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
-        {
-            portBox.Text = Port.ToString();
-            return;
-        }
-        if (port == configuredPort)
-            return;
-
-        int previous = configuredPort;
-        configuredPort = port;
-        try
-        {
-            SaveSetting("harnessPort", port.ToString());
-        }
-        catch (Exception ex)
-        {
-            Log("保存端口设置失败: " + ex.Message);
-        }
-        Log("监听端口已从 " + previous + " 改为 " + port + "（下次启动生效）。");
-        if (lastSnapshot != null && lastSnapshot.Running)
-            Log("Harness 当前仍在 " + previous + " 端口运行；点击“重启”后才会切换。");
-        RefreshState();
-    }
+    /// Whether a click on an action button should cancel the running operation instead
 
     private string DefaultInstallRoot()
     {
@@ -4784,24 +4739,15 @@ public sealed class ManagerForm : Form
     }
 
     /// <summary>
-    /// The port Harness is launched on. Read once at construction so a change takes
-    /// effect on the next start rather than mid-operation.
+    /// The port Harness is launched on and probed at.
+    ///
+    /// Fixed to the Harness default: the panel is a launcher for a service the user runs
+    /// on its default port, and an editable setting only invited a change that would not
+    /// affect an already-running instance. It stays a single value behind a property so
+    /// the sixteen call sites are not tied to the literal, and adding an entry point
+    /// later does not mean touching them all again.
     /// </summary>
-    private int Port { get { return configuredPort; } }
-
-    private int configuredPort = HarnessPortPolicy.DefaultPort;
-
-    private int LoadConfiguredPort()
-    {
-        if (!File.Exists(SettingsFile))
-            return HarnessPortPolicy.DefaultPort;
-        string raw = ReadJsonValue(File.ReadAllText(SettingsFile), "harnessPort");
-        int parsed;
-        if (Int32.TryParse(raw, out parsed) && HarnessPortPolicy.IsValid(parsed))
-            return parsed;
-        // A corrupt or out-of-range value falls back rather than failing to start.
-        return HarnessPortPolicy.DefaultPort;
-    }
+    private int Port { get { return HarnessPortPolicy.DefaultPort; } }
 
     private bool IsConfiguredRoot()
     {
@@ -4826,7 +4772,7 @@ public sealed class ManagerForm : Form
         var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(SettingsFile))
         {
-            foreach (string existing in new[] { "installRoot", "harnessPort" })
+            foreach (string existing in new[] { "installRoot", "autoStart" })
             {
                 string current = ReadJsonValue(File.ReadAllText(SettingsFile), existing);
                 if (!String.IsNullOrEmpty(current))
