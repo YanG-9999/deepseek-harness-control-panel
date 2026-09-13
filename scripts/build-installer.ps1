@@ -34,12 +34,13 @@ if (-not $match.Success) {
 $version = $match.Groups[1].Value
 Write-Host "Panel version: $version"
 
-# The installer packages an already-built executable, so make sure it exists.
-if (-not (Test-Path -LiteralPath $appExe)) {
-    Write-Host "Executable missing; building it first."
-    & (Join-Path $PSScriptRoot 'build.ps1')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
+# Always rebuild before packaging. This used to build only when the executable was
+# missing, which shipped a stale binary twice: the version in the package disagreed with
+# the source, and a packaged crash fix was not actually in the package. One second of
+# compilation is cheaper than that, and there is no way to detect staleness by eye.
+Write-Host "Building the executable for the package."
+& (Join-Path $PSScriptRoot 'build.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Locate ISCC. Missing tooling is reported as a clear instruction, not a stack trace.
 $candidates = @(
