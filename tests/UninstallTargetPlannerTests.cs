@@ -10,6 +10,7 @@ public static class UninstallTargetPlannerTests
         VerifyTargetPlanning();
         VerifyKindsAndDefaults();
         VerifySizeMeasurement();
+        VerifyJunctionsAreNotFollowed();
         VerifySizeWording();
         VerifySelectionText();
         VerifyWarning();
@@ -114,6 +115,74 @@ public static class UninstallTargetPlannerTests
         finally
         {
             try { Directory.Delete(directory, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A directory holding a junction must be measured without going through it.
+    ///
+    /// The Harness install is built from junctions: pnpm points thousands of package entries
+    /// back into the same tree, so following them re-walks the same files over and over.
+    /// Directory.GetFiles with AllDirectories follows them, and on the machine this was
+    /// written for that walk had not finished after two and a half minutes - on the UI
+    /// thread, which is what made the uninstall button look dead when it was pressed.
+    /// </summary>
+    private static void VerifyJunctionsAreNotFollowed()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "dsh-junction-" + Guid.NewGuid().ToString("N"));
+        string outside = Path.Combine(Path.GetTempPath(), "dsh-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(Path.Combine(root, "real"));
+        Directory.CreateDirectory(outside);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(root, "real", "a.bin"), new byte[2048]);
+            File.WriteAllBytes(Path.Combine(outside, "b.bin"), new byte[4096]);
+
+            long direct = UninstallSelectionPolicy.MeasureSizeBytes(root);
+            if (direct != 2048)
+                throw new InvalidOperationException("The real file must be the only size counted, got " + direct + ".");
+
+            string link = Path.Combine(root, "linked");
+            if (!TryCreateJunction(link, outside))
+                return; // No junction could be made here; the rule below is simply not exercised.
+
+            long withJunction = UninstallSelectionPolicy.MeasureSizeBytes(root);
+            if (withJunction != direct)
+                throw new InvalidOperationException(
+                    "A junction must not be measured through: without it " + direct +
+                    ", with it " + withJunction + ".");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+            try { Directory.Delete(outside, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Creates a directory junction. Junctions, unlike symbolic links, need no elevation,
+    /// which is why the test uses one; .NET has no managed API for either.
+    /// </summary>
+    private static bool TryCreateJunction(string link, string target)
+    {
+        try
+        {
+            var info = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + link + "\" \"" + target + "\"");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            using (var process = System.Diagnostics.Process.Start(info))
+            {
+                process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                return process.ExitCode == 0 && Directory.Exists(link);
+            }
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
