@@ -3034,6 +3034,10 @@ public sealed class ManagerForm : Form
 
         BuildTrayIcon();
 
+        // Start invisible and let Reveal() put the window on screen once its first frame
+        // is finished. See Reveal() for what the window looked like without this.
+        Opacity = 0;
+
     }
 
     /// <summary>
@@ -3110,6 +3114,9 @@ public sealed class ManagerForm : Form
     private void ShowFromTray()
     {
         Show();
+        // Opening from the tray is another way to become visible without the Shown event
+        // that normally reveals the window, so make sure it cannot stay transparent.
+        Reveal();
         ShowInTaskbar = true;
         WindowState = FormWindowState.Normal;
         Activate();
@@ -3144,6 +3151,7 @@ public sealed class ManagerForm : Form
     private void OnShown(object sender, EventArgs e)
     {
         Shown -= OnShown;
+        Reveal();
         if (!IsInstalled())
             return;
         Task.Run(delegate { return AutoCheckForUpdatesAsync(); });
@@ -3222,6 +3230,27 @@ public sealed class ManagerForm : Form
         // ClientRectangle is empty while the window is minimized, and the erase message
         // still arrives: the guard lives in UiBackground.Paint.
         UiBackground.Paint(e.Graphics, ClientRectangle);
+    }
+
+    private bool revealed;
+
+    /// <summary>
+    /// Makes the window visible once it has something to show.
+    ///
+    /// The window starts fully transparent. Windows shows a window the moment it is shown
+    /// and lets it paint afterwards, and this one needs several hundred milliseconds to
+    /// draw ~40 custom controls, so without this the user watches a half-built panel: the
+    /// desktop, then a window with only its background, then the controls arriving one
+    /// area at a time. Measured here, the first frame is not finished until Shown fires.
+    /// Revealing then shows one finished frame; setting Opacity back to 1 also drops the
+    /// layered style, so the text goes back on the normal ClearType path.
+    /// </summary>
+    private void Reveal()
+    {
+        if (revealed)
+            return;
+        revealed = true;
+        Opacity = 1;
     }
 
     /// <summary>
