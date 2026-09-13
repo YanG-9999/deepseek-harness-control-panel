@@ -12,6 +12,7 @@
 - `scripts/verify-installer.ps1`：校验安装脚本（不需要 Inno Setup）
 - `installer/DeepSeekHarnessControlPanel.iss`：Inno Setup 安装脚本
 - `tests/`：策略类测试（纯逻辑，不依赖网络与 Harness 安装）
+- `LICENSE`：MIT 许可证
 
 本仓库不包含 API Key、用户配置、Harness 安装目录、依赖缓存或测试日志。
 
@@ -91,3 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-installer.ps1
 面板默认使用 .NET Framework 的 `HttpClient`。在某些代理配置下（例如 TUN + fake-IP 把所有域名解析到 `198.18.0.0/15`），.NET 的 SCHANNEL 无法完成 TLS 握手，报“未能创建 SSL/TLS 安全通道”，而 Node 的 OpenSSL 栈可以正常连接。此时面板会自动改用内置的 Node 取回脚本继续请求，并在日志中说明切换原因。该回退是被动的：.NET 正常工作时不会启用，也不会在 `%TEMP%` 留下任何文件。
 
 本地 Harness 页面（`127.0.0.1:3080`）的探测始终走 .NET，不受影响。
+
+## 许可证
+
+[MIT](LICENSE)。可以自由使用、修改和再分发，只需保留版权声明与许可证原文。
