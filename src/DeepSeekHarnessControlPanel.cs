@@ -2379,6 +2379,19 @@ public static class HarnessPortPolicy
     /// <summary>The port the panel uses when nothing else is configured.</summary>
     public const int DefaultPort = 3080;
 
+    /// <summary>
+    /// What the header's port card shows while Harness is not running. The port is fixed,
+    /// so showing it next to an uninstalled and stopped service reads as "something is on
+    /// 3080" - the dash says the panel manages that port and nothing is using it now.
+    /// </summary>
+    public const string IdlePortText = "—";
+
+    /// <summary>The port card's text: the port while Harness runs, a dash while it does not.</summary>
+    public static string DescribePortDisplay(int port, bool running)
+    {
+        return running ? port.ToString() : IdlePortText;
+    }
+
     /// <summary>Ports below this are privileged and would need elevation.</summary>
     public const int MinimumPort = 1024;
     public const int MaximumPort = 65535;
@@ -3280,7 +3293,8 @@ public sealed class ManagerForm : Form
         divider.BackColor = UiStyle.FieldBorder;
         portLayout.Controls.Add(divider, 2, 0);
 
-        portLabel.Text = Port.ToString();
+        // Nothing is known about the service yet, so the card starts in its idle state.
+        portLabel.Text = HarnessPortPolicy.DescribePortDisplay(Port, false);
         // The number is a value of the "端口" caption, so it inherits that caption's size
         // and colour instead of reading as a second, louder heading.
         portLabel.Font = UiStyle.BodyFont();
@@ -4309,6 +4323,8 @@ public sealed class ManagerForm : Form
     {
         statusLabel.Text = snapshot.StatusText;
         runningLabel.Text = snapshot.RunningText;
+        // The port card follows the service: a number only while something is listening.
+        portLabel.Text = HarnessPortPolicy.DescribePortDisplay(Port, snapshot.Running);
         versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls
             ? HarnessVersionText.ForDisplay(snapshot.Version)
             : "";

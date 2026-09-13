@@ -63,14 +63,34 @@ public static class ControlPanelLayoutTests
     /// <summary>
     /// The version field holds a version number and nothing else. It used to be overwritten
     /// by the update-check result, and the same area once carried an auto-start switch.
+    ///
+    /// Whether this machine has Harness installed is not the test's business: the field
+    /// must hold a version or nothing, and asking for a version only passed on a machine
+    /// that happened to have one.
     /// </summary>
     private static void VerifyVersionRowExists(Control form)
     {
-        if (FindLabelByText(form, "Harness 版本") == null)
+        Label caption = FindLabelByText(form, "Harness 版本");
+        if (caption == null)
             throw new InvalidOperationException("The runtime-information card needs a version caption.");
 
-        // The version itself carries the display prefix, so it reads as a version number.
-        bool foundVersion = false;
+        Control value = null;
+        foreach (Control child in caption.Parent.Controls)
+        {
+            if (child != caption)
+            {
+                value = child;
+                break;
+            }
+        }
+        if (value == null)
+            throw new InvalidOperationException("The version caption needs a value beside it.");
+
+        string text = value.Text ?? "";
+        if (text.Length > 0 && !IsVersionText(text))
+            throw new InvalidOperationException(
+                "The version field must hold a version or nothing, got '" + text + "'.");
+
         var all = new System.Collections.Generic.List<Control>();
         Collect(form, all);
         foreach (Control control in all)
@@ -78,15 +98,14 @@ public static class ControlPanelLayoutTests
             if (control is CheckBox)
                 throw new InvalidOperationException(
                     "The auto-start switch was removed on purpose; no checkbox belongs in the panel.");
-            string text = control.Text ?? "";
-            if (text.StartsWith("v", StringComparison.Ordinal) && text.Length > 1 &&
-                Char.IsDigit(text[1]))
-            {
-                foundVersion = true;
-            }
         }
-        if (!foundVersion)
-            throw new InvalidOperationException("The version field must show a version such as v0.1.5-rc.2.");
+    }
+
+    /// <summary>A displayed version reads as v followed by a digit, such as v0.1.5-rc.2.</summary>
+    private static bool IsVersionText(string text)
+    {
+        return text.StartsWith("v", StringComparison.Ordinal) &&
+            text.Length > 1 && Char.IsDigit(text[1]);
     }
 
     /// <summary>
@@ -187,9 +206,11 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException(
                 "The browse button was removed on purpose; the install flow owns directory selection.");
 
-        Label port = FindLabelByText(form, HarnessPortPolicy.DefaultPort.ToString());
+        // The card shows a dash until something is listening, which is the state a form that
+        // has just been built is always in.
+        Label port = FindLabelByText(form, HarnessPortPolicy.IdlePortText);
         if (port == null)
-            throw new InvalidOperationException("The header must display the Harness default port.");
+            throw new InvalidOperationException("The header must carry the port card.");
         if (port.CanSelect)
             throw new InvalidOperationException("The displayed port must not behave like an input control.");
     }

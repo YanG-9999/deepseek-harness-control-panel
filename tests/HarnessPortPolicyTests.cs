@@ -16,6 +16,7 @@ public static class HarnessPortPolicyTests
         VerifyLocalWebUri();
         VerifyPortArgument();
         VerifyLaunchArguments();
+        VerifyPortDisplay();
         Console.WriteLine("Harness port policy tests passed.");
     }
 
@@ -111,5 +112,20 @@ public static class HarnessPortPolicyTests
             return;
         }
         throw new InvalidOperationException("Expected an ArgumentOutOfRangeException for " + label + ".");
+    }
+
+    /// <summary>
+    /// The header's port card is a state readout, not a constant: a fixed port shown next to
+    /// an uninstalled, stopped service reads as "something is listening on 3080".
+    /// </summary>
+    private static void VerifyPortDisplay()
+    {
+        if (HarnessPortPolicy.DescribePortDisplay(HarnessPortPolicy.DefaultPort, true) != "3080")
+            throw new InvalidOperationException("A running service must show its port.");
+        if (HarnessPortPolicy.DescribePortDisplay(HarnessPortPolicy.DefaultPort, false) != HarnessPortPolicy.IdlePortText)
+            throw new InvalidOperationException("A stopped service must not show a port number.");
+        if (String.IsNullOrEmpty(HarnessPortPolicy.IdlePortText) ||
+            HarnessPortPolicy.IdlePortText == HarnessPortPolicy.DefaultPort.ToString())
+            throw new InvalidOperationException("The idle text must differ from a port number, or the card says nothing.");
     }
 }
