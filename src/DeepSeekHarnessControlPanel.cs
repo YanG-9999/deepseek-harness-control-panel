@@ -717,9 +717,58 @@ public static class StateSecretProtection
     }
 }
 
-public static class HarnessLifecyclePolicy
+/// <summary>
+/// Decides what the panel should say about update availability. Kept separate from
+/// the network and UI so the wording rules are testable.
+/// </summary>
+public static class HarnessUpdatePolicy
 {
-    public const int StartupTimeoutSeconds = 120;
+    /// <summary>
+    /// A commit is a 40-character hex digest. Anything else (empty, truncated, or a
+    /// partially written state file) must not be compared as if it were a version.
+    /// </summary>
+    public static bool IsCommitId(string value)
+    {
+        return Regex.IsMatch(value ?? "", "^[0-9a-fA-F]{40}$");
+    }
+
+    /// <summary>
+    /// Whether the two commits differ. An unknown local commit cannot be compared,
+    /// so it never counts as "an update is available" — claiming an update on a
+    /// value we could not read would be a false alarm.
+    /// </summary>
+    public static bool HasUpdate(string localCommit, string remoteCommit)
+    {
+        if (!IsCommitId(localCommit) || !IsCommitId(remoteCommit))
+            return false;
+        return !String.Equals(localCommit, remoteCommit, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Short form of a commit for display, or an explicit unknown marker.</summary>
+    public static string ShortCommit(string commit)
+    {
+        if (!IsCommitId(commit))
+            return "未知";
+        return commit.Substring(0, 7);
+    }
+
+    /// <summary>
+    /// The line the panel shows in the status area after an automatic check.
+    /// </summary>
+    public static string DescribeAvailability(string localCommit, string remoteCommit)
+    {
+        if (!IsCommitId(remoteCommit))
+            return "";
+        if (!IsCommitId(localCommit))
+            return "上游最新提交 " + ShortCommit(remoteCommit) + "（本机版本未知，无法比较）";
+        if (HasUpdate(localCommit, remoteCommit))
+            return "发现新版本，可更新（本机 " + ShortCommit(localCommit) + " → 上游 " + ShortCommit(remoteCommit) + "）";
+        return "已是最新版本（" + ShortCommit(localCommit) + "）";
+    }
+}
+
+public static class HarnessLifecyclePolicy
+{    public const int StartupTimeoutSeconds = 120;
     public const int StopTimeoutMilliseconds = 30000;
     public const int PollIntervalMilliseconds = 250;
     public const int EndpointProbeIntervalMilliseconds = 1000;
@@ -843,6 +892,9 @@ public sealed class ManagerForm : Form
     private string selectedSourceCommit = "";
     private string nodeHelperPath = "";
 
+    /// <summary>Guards against two overlapping automatic update checks.</summary>
+    private bool updateCheckRunning;
+
     /// <summary>
     /// Set once a request proves the .NET Framework TLS stack cannot complete a
     /// handshake on this machine. From then on every outbound request goes through
@@ -867,6 +919,61 @@ public sealed class ManagerForm : Form
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
         RefreshState();
+
+        // Check for an upstream release once the window is up. Runs after the first
+        // paint and never blocks or alerts: a failed check is a normal condition.
+        Shown += OnShown;
+    }
+
+    private void OnShown(object sender, EventArgs e)
+    {
+        Shown -= OnShown;
+        if (!IsInstalled())
+            return;
+        Task.Run(delegate { return AutoCheckForUpdatesAsync(); });
+    }
+
+    /// <summary>
+    /// Automatic update check. Deliberately quiet: no modal dialog, no busy state,
+    /// and no effect on the action buttons. The manual "检查 Harness 更新" button
+    /// remains the place that asks before updating.
+    /// </summary>
+    private async Task AutoCheckForUpdatesAsync()
+    {
+        if (updateCheckRunning)
+            return;
+        updateCheckRunning = true;
+        try
+        {
+            string branch = await GetDefaultBranchAsync();
+            string remote = await GetRemoteCommitAsync(branch);
+            string local = LocalCommit();
+            string message = HarnessUpdatePolicy.DescribeAvailability(local, remote);
+            if (String.IsNullOrEmpty(message))
+                return;
+            Log("自动检查更新：" + message +
+                (HarnessUpdatePolicy.HasUpdate(local, remote) ? "。点击“检查 Harness 更新”即可升级。" : "。"));
+            ShowUpdateStatus(message);
+        }
+        catch (Exception)
+        {
+            // Offline, rate limited, or a proxy fault is not worth interrupting the
+            // user at startup; the manual button still reports failures.
+        }
+        finally
+        {
+            updateCheckRunning = false;
+        }
+    }
+
+    private void ShowUpdateStatus(string message)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke((Action)delegate { ShowUpdateStatus(message); });
+            return;
+        }
+        versionLabel.Text = message;
     }
 
     private void BuildUi()
