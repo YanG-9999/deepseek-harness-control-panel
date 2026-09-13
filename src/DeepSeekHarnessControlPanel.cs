@@ -901,11 +901,11 @@ public static class UiMeasure
     /// both. Measured rather than fixed because the nine action buttons share one row and
     /// their labels differ a lot in length.
     /// </summary>
-    public static int MeasureButtonWidth(string text, string glyph)
+    public static int MeasureButtonWidth(string text, UiIcon icon)
     {
         Size textSize = TextRenderer.MeasureText(text ?? "", UiStyle.ButtonFont());
         int width = textSize.Width + UiStyle.ButtonPadding;
-        if (!String.IsNullOrEmpty(glyph))
+        if (UiIconPainter.HasIcon(icon))
             width += UiStyle.IconSize + UiStyle.IconGap;
         return Math.Max(width, 84);
     }
@@ -914,11 +914,11 @@ public static class UiMeasure
     /// The width a log toolbar button needs, which is tighter: five of them share a row
     /// with the search box.
     /// </summary>
-    public static int MeasureToolbarButtonWidth(string text, string glyph)
+    public static int MeasureToolbarButtonWidth(string text, UiIcon icon)
     {
         Size textSize = TextRenderer.MeasureText(text ?? "", UiStyle.ButtonFont());
         int width = textSize.Width + 22;
-        if (!String.IsNullOrEmpty(glyph))
+        if (UiIconPainter.HasIcon(icon))
             width += UiStyle.IconSize + 6;
         return Math.Max(width, 34);
     }
@@ -1149,6 +1149,281 @@ public sealed class UiValueChip : Label
 }
 
 /// <summary>
+/// The icon names the panel draws. A name rather than a font glyph: these are drawn as
+/// vector strokes, so they stay crisp at any size and do not depend on an icon font being
+/// installed or on a network fetch.
+/// </summary>
+public enum UiIcon
+{
+    None,
+    Install,
+    Uninstall,
+    Start,
+    Restart,
+    Stop,
+    Update,
+    OpenPage,
+    Rescan,
+    OpenFolder,
+    ChevronUp,
+    ChevronDown,
+    Export,
+    Clear,
+    Search
+}
+
+/// <summary>
+/// Draws the panel's icons as vector strokes on a 0-24 design grid.
+///
+/// Every icon is described with the same vocabulary and drawn with one pen, so stroke
+/// weight, round caps, and corner treatment cannot drift between icons. Coordinates are
+/// normalized from the 24-unit grid onto whatever rectangle the caller needs, which is how
+/// the same definition serves a 16px button icon and a larger one without a second asset.
+/// </summary>
+public static class UiIconPainter
+{
+    /// <summary>
+    /// The stroke width used for an icon drawn at its display size. It is deliberately not
+    /// scaled down with the icon: at 16px a proportional 1.2px stroke anti-aliases into a
+    /// grey smear, so the panel uses the same absolute weight the mockup does.
+    /// </summary>
+    private const float DisplayStroke = 1.8f;
+
+    private const float DesignSize = 24f;
+
+    /// <summary>Whether a name has geometry behind it.</summary>
+    public static bool HasIcon(UiIcon icon)
+    {
+        return icon != UiIcon.None;
+    }
+
+    /// <summary>
+    /// The path grammar for one icon: polylines, an ellipse, a rounded rectangle, or a
+    /// filled polygon. Kept deliberately small: the icons only need these four shapes, and
+    /// a tiny grammar cannot drift the way a full path parser would.
+    /// </summary>
+    private static string Geometry(UiIcon icon)
+    {
+        switch (icon)
+        {
+            // Arrow into a tray.
+            case UiIcon.Install:
+                return "P 12,3 12,15;P 7,10 12,15 17,10;P 4,20 20,20";
+
+            // Bin with a lid and two ribs.
+            case UiIcon.Uninstall:
+            case UiIcon.Clear:
+                return "P 4,7 20,7;P 10,11 10,17;P 14,11 14,17;"
+                     + "P 6,7 7,20 17,20 18,7;P 9,7 9,4 15,4 15,7";
+
+            // Solid play triangle.
+            case UiIcon.Start:
+                return "F 7,4.5 19,12 7,19.5";
+
+            // Open circle with an arrow head: the restart convention.
+            case UiIcon.Restart:
+                return "P 20,12 20,10;A 20,12 8,8;P 20,4 20,9 15,9";
+
+            // A rounded square, which reads as stop without a second colour.
+            case UiIcon.Stop:
+                return "R 6,6 12,12 2";
+
+            // Circular sync arrow. A cloud outline was rejected: stroked as a polyline it
+            // closes across the flat bottom and reads as a closed blob, and the arc grammar
+            // here is deliberately too small to express a real cloud.
+            case UiIcon.Update:
+                return "P 20,12 20,10;A 20,12 8,8;P 20,4 20,9 15,9";
+
+            // Box with an arrow leaving it.
+            case UiIcon.OpenPage:
+                return "P 14,4 20,4 20,10;P 20,4 12,12;P 18,14 18,19 5,19 5,7 10,7";
+
+            // Magnifier with a plus inside: look again, distinct from the plain magnifier
+            // used by the search field.
+            case UiIcon.Rescan:
+                return "E 11,11 6.5,6.5;P 16,16 20.5,20.5;P 8,11 14,11;P 11,8 11,14";
+
+            case UiIcon.Search:
+                return "E 11,11 6.5,6.5;P 16,16 20.5,20.5";
+
+            // Folder outline.
+            case UiIcon.OpenFolder:
+                return "P 3,7.5 3,17.5 19,17.5 19,10 9.5,10 7.5,6 4.5,6 3,7.5";
+
+            case UiIcon.ChevronUp:
+                return "P 6,15 12,9 18,15";
+
+            case UiIcon.ChevronDown:
+                return "P 6,9 12,15 18,9";
+
+            // Arrow rising out of a tray.
+            case UiIcon.Export:
+                return "P 12,16 12,4;P 8,8 12,4 16,8;P 4,16 4,19 20,19 20,16";
+
+            default:
+                return "";
+        }
+    }
+
+    /// <summary>
+    /// Draws an icon centred in the given rectangle, scaled to fit. A filled shape is
+    /// filled; everything else is stroked with the shared pen settings.
+    /// </summary>
+    public static void Draw(Graphics graphics, UiIcon icon, Rectangle bounds, Color color)
+    {
+        if (!HasIcon(icon) || bounds.Width <= 0 || bounds.Height <= 0)
+            return;
+
+        string geometry = Geometry(icon);
+        if (String.IsNullOrEmpty(geometry))
+            return;
+
+        // Scale the 24-unit grid onto the target box, keeping the icon square so a wide
+        // button does not stretch the artwork.
+        int side = Math.Min(bounds.Width, bounds.Height);
+        float scale = side / DesignSize;
+        float offsetX = bounds.X + ((bounds.Width - side) / 2f);
+        float offsetY = bounds.Y + ((bounds.Height - side) / 2f);
+
+        System.Drawing.Drawing2D.SmoothingMode previous = graphics.SmoothingMode;
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        try
+        {
+            // Absolute weight up to the design size, proportional only when enlarged, so a
+            // larger rendering does not end up with a hairline stroke.
+            float stroke = scale >= 1f ? DisplayStroke * scale : DisplayStroke;
+            using (var pen = new Pen(color, stroke))
+            {
+                pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+
+                foreach (string segment in geometry.Split(';'))
+                {
+                    string piece = segment.Trim();
+                    if (piece.Length == 0)
+                        continue;
+                    float[] numbers = ParseNumbers(piece);
+
+                    if (piece.StartsWith("A", StringComparison.Ordinal))
+                    {
+                        // Arc: centre x, centre y, radius x, radius y. Drawn as a full
+                        // ellipse and then masked away by the caller's next stroke, which is
+                        // why the restart icon lists its gap as a separate polyline.
+                        if (numbers.Length >= 4)
+                        {
+                            var box = ScaleRect(numbers[0] - numbers[2], numbers[1] - numbers[3],
+                                numbers[2] * 2, numbers[3] * 2, scale, offsetX, offsetY);
+                            graphics.DrawEllipse(pen, box);
+                        }
+                        continue;
+                    }
+
+                    if (piece.StartsWith("E", StringComparison.Ordinal))
+                    {
+                        // Ellipse: centre x, centre y, radius x, radius y.
+                        if (numbers.Length >= 4)
+                        {
+                            var box = ScaleRect(numbers[0] - numbers[2], numbers[1] - numbers[3],
+                                numbers[2] * 2, numbers[3] * 2, scale, offsetX, offsetY);
+                            graphics.DrawEllipse(pen, box);
+                        }
+                        continue;
+                    }
+
+                    if (piece.StartsWith("R", StringComparison.Ordinal))
+                    {
+                        // Rounded rectangle: x, y, width, height, corner radius.
+                        if (numbers.Length >= 5)
+                        {
+                            var box = ScaleRect(numbers[0], numbers[1], numbers[2], numbers[3], scale, offsetX, offsetY);
+                            int radius = Math.Max(1, (int)Math.Round(numbers[4] * scale));
+                            using (System.Drawing.Drawing2D.GraphicsPath path = UiShapes.RoundedRect(box, radius))
+                                graphics.DrawPath(pen, path);
+                        }
+                        continue;
+                    }
+
+                    if (piece.StartsWith("F", StringComparison.Ordinal))
+                    {
+                        // Filled polygon: x,y pairs closed automatically.
+                        var points = ParsePoints(numbers, scale, offsetX, offsetY);
+                        if (points.Length >= 3)
+                        {
+                            using (var brush = new SolidBrush(color))
+                                graphics.FillPolygon(brush, points);
+                        }
+                        continue;
+                    }
+
+                    // Default: polyline through the points.
+                    var line = ParsePoints(numbers, scale, offsetX, offsetY);
+                    if (line.Length >= 2)
+                        graphics.DrawLines(pen, line);
+                }
+            }
+        }
+        finally
+        {
+            graphics.SmoothingMode = previous;
+        }
+    }
+
+    private static Rectangle ScaleRect(float x, float y, float width, float height, float scale, float offsetX, float offsetY)
+    {
+        return new Rectangle(
+            (int)Math.Round(offsetX + (x * scale)),
+            (int)Math.Round(offsetY + (y * scale)),
+            Math.Max(1, (int)Math.Round(width * scale)),
+            Math.Max(1, (int)Math.Round(height * scale)));
+    }
+
+    private static PointF[] ParsePoints(float[] numbers, float scale, float offsetX, float offsetY)
+    {
+        int count = numbers.Length / 2;
+        var points = new PointF[count];
+        for (int i = 0; i < count; i++)
+        {
+            points[i] = new PointF(
+                offsetX + (numbers[i * 2] * scale),
+                offsetY + (numbers[(i * 2) + 1] * scale));
+        }
+        return points;
+    }
+
+    /// <summary>
+    /// Pulls the numbers out of one segment. Written by hand rather than with a regular
+    /// expression so a malformed icon degrades to fewer points instead of throwing.
+    /// </summary>
+    private static float[] ParseNumbers(string piece)
+    {
+        var found = new List<float>();
+        int index = 0;
+        while (index < piece.Length)
+        {
+            if (piece[index] == '-' || piece[index] == '.' || Char.IsDigit(piece[index]))
+            {
+                int start = index;
+                index++;
+                while (index < piece.Length &&
+                       (piece[index] == '.' || Char.IsDigit(piece[index])))
+                    index++;
+                float value;
+                if (Single.TryParse(piece.Substring(start, index - start),
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out value))
+                    found.Add(value);
+            }
+            else
+            {
+                index++;
+            }
+        }
+        return found.ToArray();
+    }
+}
+
+/// <summary>
 /// A flat button in the two styles the design uses: a solid primary action and a
 /// bordered secondary one. Standard WinForms buttons cannot be restyled to this shape.
 /// </summary>
@@ -1156,15 +1431,15 @@ public sealed class UiFlatButton : Button
 {
     public bool IsPrimary { get; set; }
 
-    /// <summary>An icon glyph from Segoe MDL2 Assets, or empty for no icon.</summary>
-    public string Glyph { get; set; }
+    /// <summary>The drawn icon, or None for a text-only button.</summary>
+    public UiIcon Icon { get; set; }
 
     private bool hovered;
     private bool pressed;
 
     public UiFlatButton()
     {
-        Glyph = "";
+        Icon = UiIcon.None;
         FlatStyle = FlatStyle.Flat;
         FlatAppearance.BorderSize = 0;
         UseVisualStyleBackColor = false;
@@ -1238,25 +1513,20 @@ public sealed class UiFlatButton : Button
         UiShapes.DrawRounded(e.Graphics, bounds, UiStyle.ButtonRadius, fill, border, 1);
 
         // Icon and label are laid out as one centred group, as in the design.
-        bool hasGlyph = !String.IsNullOrEmpty(Glyph);
+        bool hasIcon = UiIconPainter.HasIcon(Icon);
         Size textSize = TextRenderer.MeasureText(Text, Font);
-        int gap = hasGlyph ? 6 : 0;
-        int iconWidth = hasGlyph ? UiStyle.IconSize : 0;
+        int gap = hasIcon ? UiStyle.IconGap : 0;
+        int iconWidth = hasIcon ? UiStyle.IconSize : 0;
         int totalWidth = iconWidth + gap + textSize.Width;
         int x = Math.Max(8, (Width - totalWidth) / 2);
 
-        if (hasGlyph)
+        if (hasIcon)
         {
-            using (var iconFont = UiStyle.IconFont(UiStyle.IconSize))
-            {
-                TextRenderer.DrawText(
-                    e.Graphics,
-                    Glyph,
-                    iconFont,
-                    new Rectangle(x, 0, iconWidth + 4, Height),
-                    text,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-            }
+            UiIconPainter.Draw(
+                e.Graphics,
+                Icon,
+                new Rectangle(x, (Height - iconWidth) / 2, iconWidth, iconWidth),
+                text);
             x += iconWidth + gap;
         }
 
@@ -1397,7 +1667,7 @@ public static class UiStyle
     public const int FieldHeight = 42;
     public const int FieldRadius = 9;
     public const int ToolButtonHeight = 38;
-    public const int IconSize = 14;
+    public const int IconSize = 17;
 
     /// <summary>Space between the icon and its label inside a button.</summary>
     public const int IconGap = 7;
@@ -1413,22 +1683,6 @@ public static class UiStyle
 
     /// <summary>The shortest the log region is allowed to become.</summary>
     public const int LogMinHeight = 150;
-
-    /// <summary>Icon glyphs from Segoe MDL2 Assets, matching the design's icon set.</summary>
-    public const string GlyphInstall = "\uE896";   // download
-    public const string GlyphUninstall = "\uE74D"; // delete
-    public const string GlyphStart = "\uE768";     // play
-    public const string GlyphRestart = "\uE72C";   // refresh
-    public const string GlyphStop = "\uE71A";      // stop
-    public const string GlyphUpdate = "\uE895";    // sync
-    public const string GlyphOpenPage = "\uE8A7";  // open in new window
-    public const string GlyphRescan = "\uE721";    // search
-    public const string GlyphOpenFolder = "\uE8B7";// folder
-    public const string GlyphFindNext = "\uE74B";  // chevron down
-    public const string GlyphFindPrev = "\uE74A";  // chevron up
-    public const string GlyphExport = "\uEDE1";    // export
-    public const string GlyphClear = "\uE74D";     // delete
-    public const string GlyphSearch = "\uE721";    // magnifier
 
     // Font sizes are converted from the design's CSS pixels to GDI+ points. The two units
     // are not interchangeable: 1px is 0.75pt at 96 DPI, so writing a pixel size straight
@@ -1470,22 +1724,6 @@ public static class UiStyle
     public static Font LogFont()
     {
         return new Font("Consolas", 9.75F, FontStyle.Regular);           // 13px
-    }
-
-    /// <summary>
-    /// The icon font at a given size. Falls back to the body font when the Windows icon
-    /// font is unavailable, so a missing font degrades to text rather than to nothing.
-    /// </summary>
-    public static Font IconFont(float size)
-    {
-        try
-        {
-            return new Font("Segoe MDL2 Assets", size, FontStyle.Regular);
-        }
-        catch (ArgumentException)
-        {
-            return BodyFont();
-        }
     }
 }
 
@@ -2954,15 +3192,15 @@ public sealed class ManagerForm : Form
         buttons.FlowDirection = FlowDirection.LeftToRight;
         buttons.BackColor = UiStyle.CardBackground;
 
-        StyleActionButton(installButton, "一键安装", UiStyle.GlyphInstall, true, InstallClick);
-        StyleActionButton(uninstallButton, "彻底卸载", UiStyle.GlyphUninstall, false, UninstallClick);
-        StyleActionButton(startButton, "启动", UiStyle.GlyphStart, false, StartClick);
-        StyleActionButton(restartButton, "重启", UiStyle.GlyphRestart, false, RestartClick);
-        StyleActionButton(stopButton, "停止", UiStyle.GlyphStop, false, StopClick);
-        StyleActionButton(updateButton, "检查更新", UiStyle.GlyphUpdate, false, UpdateClick);
-        StyleActionButton(openButton, "打开页面", UiStyle.GlyphOpenPage, false, OpenClick);
-        StyleActionButton(rescanButton, "重新扫描", UiStyle.GlyphRescan, false, RescanClick);
-        StyleActionButton(openFolderButton, "打开目录", UiStyle.GlyphOpenFolder, false, OpenFolderClick);
+        StyleActionButton(installButton, "一键安装", UiIcon.Install, true, InstallClick);
+        StyleActionButton(uninstallButton, "彻底卸载", UiIcon.Uninstall, false, UninstallClick);
+        StyleActionButton(startButton, "启动", UiIcon.Start, false, StartClick);
+        StyleActionButton(restartButton, "重启", UiIcon.Restart, false, RestartClick);
+        StyleActionButton(stopButton, "停止", UiIcon.Stop, false, StopClick);
+        StyleActionButton(updateButton, "检查更新", UiIcon.Update, false, UpdateClick);
+        StyleActionButton(openButton, "打开页面", UiIcon.OpenPage, false, OpenClick);
+        StyleActionButton(rescanButton, "重新扫描", UiIcon.Rescan, false, RescanClick);
+        StyleActionButton(openFolderButton, "打开目录", UiIcon.OpenFolder, false, OpenFolderClick);
 
         buttons.Controls.Add(installButton);
         buttons.Controls.Add(uninstallButton);
@@ -2987,7 +3225,7 @@ public sealed class ManagerForm : Form
     private static void StyleActionButton(
         Button button,
         string text,
-        string glyph,
+        UiIcon icon,
         bool primary,
         EventHandler handler)
     {
@@ -2995,11 +3233,11 @@ public sealed class ManagerForm : Form
         if (flat == null)
             throw new InvalidOperationException("Action buttons must be created as UiFlatButton.");
         flat.Text = text;
-        flat.Glyph = glyph;
+        flat.Icon = icon;
         flat.IsPrimary = primary;
         flat.AutoSize = false;
         flat.Height = UiStyle.ButtonHeight;
-        flat.Width = UiMeasure.MeasureButtonWidth(text, glyph);
+        flat.Width = UiMeasure.MeasureButtonWidth(text, icon);
         flat.Margin = new Padding(0, 0, 7, 0);
         flat.Click += handler;
     }
@@ -3072,13 +3310,13 @@ public sealed class ManagerForm : Form
 
         // In a right-to-left flow the first control added sits furthest right. The intended
         // left-to-right order is 上一个, 下一个, 导出, 清空, so they are added reversed.
-        StyleToolbarButton(logClearButton, "清空", UiStyle.GlyphClear, LogClearClick);
+        StyleToolbarButton(logClearButton, "清空", UiIcon.Clear, LogClearClick);
         toolbar.Controls.Add(logClearButton);
-        StyleToolbarButton(logExportButton, "导出", UiStyle.GlyphExport, LogExportClick);
+        StyleToolbarButton(logExportButton, "导出", UiIcon.Export, LogExportClick);
         toolbar.Controls.Add(logExportButton);
-        StyleToolbarIconButton(logFindNextButton, "下一个", UiStyle.GlyphFindNext, LogFindNextClick);
+        StyleToolbarIconButton(logFindNextButton, "下一个", UiIcon.ChevronDown, LogFindNextClick);
         toolbar.Controls.Add(logFindNextButton);
-        StyleToolbarIconButton(logFindPreviousButton, "上一个", UiStyle.GlyphFindPrev, LogFindPreviousClick);
+        StyleToolbarIconButton(logFindPreviousButton, "上一个", UiIcon.ChevronUp, LogFindPreviousClick);
         toolbar.Controls.Add(logFindPreviousButton);
 
         // The match count sits left of the buttons and is only as wide as it needs.
@@ -3148,9 +3386,9 @@ public sealed class ManagerForm : Form
     /// A toolbar button that shows only its icon. The label goes to the tooltip, which is
     /// how the design presents the navigation buttons.
     /// </summary>
-    private static void StyleToolbarIconButton(Button button, string label, string glyph, EventHandler handler)
+    private static void StyleToolbarIconButton(Button button, string label, UiIcon icon, EventHandler handler)
     {
-        StyleToolbarButton(button, "", glyph, handler);
+        StyleToolbarButton(button, "", icon, handler);
         var flat = button as UiFlatButton;
         flat.Width = 44;
         // An icon-only button has no visible label, so the name lives in the accessibility
@@ -3160,18 +3398,18 @@ public sealed class ManagerForm : Form
         tip.SetToolTip(flat, label);
     }
 
-    private static void StyleToolbarButton(Button button, string text, string glyph, EventHandler handler)
+    private static void StyleToolbarButton(Button button, string text, UiIcon icon, EventHandler handler)
     {
         var flat = button as UiFlatButton;
         if (flat == null)
             throw new InvalidOperationException("Log toolbar buttons must be created as UiFlatButton.");
         flat.Text = text;
-        flat.Glyph = glyph;
+        flat.Icon = icon;
         flat.IsPrimary = false;
         // Sized to its own label: a fixed width clipped "上一个" to "上...".
         flat.AutoSize = false;
         flat.Height = UiStyle.ToolButtonHeight;
-        flat.Width = UiMeasure.MeasureToolbarButtonWidth(text, glyph);
+        flat.Width = UiMeasure.MeasureToolbarButtonWidth(text, icon);
         flat.Margin = new Padding(0, 2, 4, 0);
         flat.Click += handler;
     }
