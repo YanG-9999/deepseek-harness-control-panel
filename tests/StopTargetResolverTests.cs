@@ -47,6 +47,7 @@ public static class StopTargetResolverTests
     private static void RunAll()
     {
         ControlPanelLayoutTests.Run();
+        BrandMarkArtTests.Run();
         UninstallTargetPlannerTests.Run();
         LogLineFormatterTests.Run();
         LogViewRenderingTests.Run();
@@ -61,7 +62,7 @@ public static class StopTargetResolverTests
         SingleInstancePolicyTests.Run();
         HarnessStatusChangePolicyTests.Run();
         OperationCancellationPolicyTests.Run();
-        LogSearchPolicyTests.Run();
+        LogExportPolicyTests.Run();
         HarnessPortPolicyTests.Run();
         AutoStartAndTrayPolicyTests.Run();
         PanelVersionPolicyTests.Run();

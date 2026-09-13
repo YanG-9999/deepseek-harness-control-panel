@@ -7,21 +7,56 @@ public static class ControlPanelLayoutTests
     {
         using (var form = new ManagerForm())
         {
-            FlowLayoutPanel buttons = FindFlowLayout(form);
-            if (buttons == null)
-                throw new InvalidOperationException("Button panel was not found.");
-            // The approved design puts all nine actions on one row, so the panel must not
-            // wrap. It previously wrapped, which is what the assertion here used to require.
-            if (buttons.WrapContents)
-                throw new InvalidOperationException("Button panel must keep every action on one row.");
-            if (buttons.AutoScroll)
-                throw new InvalidOperationException("Button panel must not show scrollbars.");
-            if (buttons.Controls.Count != 9)
-                throw new InvalidOperationException("Expected 9 action buttons, got " + buttons.Controls.Count + ".");
+            VerifyActionButtons(form);
 
             VerifyInstallDirectoryRow(form);
+            VerifyInfoCardBottomClearance(form);
             VerifyLogToolbarExists(form);
             VerifyVersionRowExists(form);
+        }
+    }
+
+    private static void VerifyInfoCardBottomClearance(Form form)
+    {
+        form.Show();
+        Application.DoEvents();
+
+        Label caption = FindLabelByText(form, "Harness 版本");
+        if (caption == null)
+            throw new InvalidOperationException("The version caption was not found.");
+
+        Control value = null;
+        foreach (Control child in caption.Parent.Controls)
+        {
+            if (child != caption)
+            {
+                value = child;
+                break;
+            }
+        }
+        Control card = caption.Parent;
+        while (card != null && !(card is UiCardPanel))
+            card = card.Parent;
+        if (value == null || card == null)
+            throw new InvalidOperationException("The information card layout was not found.");
+
+        System.Drawing.Point topLeft = card.PointToClient(value.PointToScreen(System.Drawing.Point.Empty));
+        int clearance = card.ClientSize.Height - topLeft.Y - value.Height;
+        if (clearance < UiMetrics.CardPaddingY)
+        {
+            throw new InvalidOperationException(
+                "The information fields are too close to the card bottom: " + clearance + "px.");
+        }
+    }
+
+    private static void VerifyActionButtons(Control form)
+    {
+        foreach (string label in new[] {
+            "安装", "卸载", "启动", "重启", "停止",
+            "检查更新", "打开页面", "扫描", "打开目录" })
+        {
+            if (FindButtonByText(form, label) == null)
+                throw new InvalidOperationException("The action grid is missing its '" + label + "' button.");
         }
     }
 
@@ -56,26 +91,31 @@ public static class ControlPanelLayoutTests
 
     /// <summary>
     /// The log area needs its own controls. Without them the only way to share a
-    /// failure was to drag-select the text box by hand, and there was no way to find a
-    /// keyword in a long install log.
+    /// failure was to drag-select the text box by hand.
+    ///
+    /// The search box and the previous/next pair were removed on purpose: they took a
+    /// whole row for a rarely used feature. Only the two actions that earn their space
+    /// remain, so this asserts they are present and that nothing re-adds the rest.
     /// </summary>
     private static void VerifyLogToolbarExists(Control form)
     {
-        if (FindTextBox(form) == null)
-            throw new InvalidOperationException("The log needs a search box (and the port needs a box).");
-
-        // Two of the toolbar buttons are icon-only, with their label in a tooltip, which is
-        // how the design presents the navigation pair; the rest carry their text.
         foreach (string label in new[] { "导出", "清空" })
         {
-            if (FindButtonByText(form, label) == null)
+            Button button = FindButtonByText(form, label);
+            if (button == null)
                 throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
+            UiFlatButton flat = button as UiFlatButton;
+            if (flat == null || button.ClientSize.Width < UiMeasure.MeasureToolbarButtonWidth(label, flat.Icon))
+                throw new InvalidOperationException("The log toolbar clips its '" + label + "' button.");
         }
-        foreach (string label in new[] { "上一个", "下一个" })
+        foreach (string removed in new[] { "上一个", "下一个" })
         {
-            if (FindButtonByName(form, label) == null)
-                throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
+            if (FindButtonByText(form, removed) != null)
+                throw new InvalidOperationException(
+                    "The log toolbar must not carry the removed '" + removed + "' button.");
         }
+        if (FindTextBox(form) != null)
+            throw new InvalidOperationException("The log search box was removed on purpose.");
 
         RichTextBox log = FindRichTextBox(form);
         if (log == null)
@@ -84,6 +124,10 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException("The log must stay read-only.");
     }
 
+    /// <summary>
+    /// Any text box left on the form. The port is a plain label now and the log search
+    /// box is gone, so this should find nothing; it stays as the guard for that.
+    /// </summary>
     private static TextBox FindTextBox(Control parent)
     {
         foreach (Control child in parent.Controls)
@@ -123,12 +167,11 @@ public static class ControlPanelLayoutTests
     /// form) reports false. Reachability is confirmed by driving the real window.
     /// </summary>
     /// <summary>
-    /// The runtime-information card must carry the four facts, and the header must carry
-    /// an editable port field.
+    /// The runtime-information card must carry the four facts, and the header must show
+    /// Harness's fixed default port.
     ///
     /// The browse button is gone for good: the directory can only be chosen before an
-    /// install, and the install flow already opens its own picker. The port is editable
-    /// again, which the approved design calls for.
+    /// install, and the install flow already opens its own picker.
     /// </summary>
     private static void VerifyInstallDirectoryRow(Control form)
     {
@@ -144,14 +187,11 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException(
                 "The browse button was removed on purpose; the install flow owns directory selection.");
 
-        // Exactly one text box belongs to the header: the editable port.
-        TextBox port = FindTextBox(form);
+        Label port = FindLabelByText(form, HarnessPortPolicy.DefaultPort.ToString());
         if (port == null)
-            throw new InvalidOperationException("The header needs an editable port field.");
-
-        int value;
-        if (!Int32.TryParse(port.Text, out value) || !HarnessPortPolicy.IsValid(value))
-            throw new InvalidOperationException("The port field must show a usable port, got '" + port.Text + "'.");
+            throw new InvalidOperationException("The header must display the Harness default port.");
+        if (port.CanSelect)
+            throw new InvalidOperationException("The displayed port must not behave like an input control.");
     }
 
     /// <summary>Finds a label with the given text anywhere under the parent.</summary>
@@ -185,22 +225,6 @@ public static class ControlPanelLayoutTests
         return null;
     }
 
-    /// <summary>
-    /// Finds an icon-only button by its accessible name. Two toolbar buttons show only an
-    /// icon, so this is how they are identified.
-    /// </summary>
-    private static Button FindButtonByName(Control parent, string name)
-    {
-        var all = new System.Collections.Generic.List<Control>();
-        Collect(parent, all);
-        foreach (Control control in all)
-        {
-            if (control.AccessibleName == name)
-                return control as Button;
-        }
-        return null;
-    }
-
     private static void Collect(Control parent, System.Collections.Generic.List<Control> into)
     {
         foreach (Control child in parent.Controls)
@@ -223,17 +247,4 @@ public static class ControlPanelLayoutTests
         return null;
     }
 
-    private static FlowLayoutPanel FindFlowLayout(Control parent)
-    {
-        foreach (Control child in parent.Controls)
-        {
-            var flow = child as FlowLayoutPanel;
-            if (flow != null)
-                return flow;
-            flow = FindFlowLayout(child);
-            if (flow != null)
-                return flow;
-        }
-        return null;
-    }
 }

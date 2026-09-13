@@ -41,11 +41,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1 -OutputDirectory .\b
 
 运行生成的控制面板后：
 
-1. 在未安装 Harness 的电脑上点击“一键安装”并选择空目录。
+1. 在未安装 Harness 的电脑上点击“安装”并选择空目录。
 2. 安装完成后使用“启动”“重启”“停止”控制服务。
 3. “检查 Harness 更新”仅检查官方 `deepseek-ai/deepseek-harness` 仓库的更新，不更新此控制面板。
 4. 关闭窗口会最小化到托盘；首次关闭会说明这一点。要完全退出请用托盘菜单里的“退出”。
-5. “彻底卸载”会列出每个删除目标及大小，其中**用户数据默认不勾选**。
+5. “卸载”会列出每个删除目标及大小，其中**用户数据默认不勾选**。
 
 ## 安装包
 
@@ -74,7 +74,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
 - `%USERPROFILE%\.dsh` —— 其中的 API Key、会话记录和附件删掉无法恢复
 - Harness 安装目录内的 `.dsh-manager-state.json`
 
-删除 Harness 请使用面板内的“彻底卸载”。两者必须严格分开：卸载一个几百 KB 的面板不应该连带丢掉无法恢复的凭据和会话。
+删除 Harness 请使用面板内的“卸载”。两者必须严格分开：卸载一个几百 KB 的面板不应该连带丢掉无法恢复的凭据和会话。
 
 这条边界不只写在注释里，`scripts\verify-installer.ps1` 会实际检查它——任何指向上述路径的指令、或 `[UninstallDelete]` 里的递归删除，都会让校验失败：
 

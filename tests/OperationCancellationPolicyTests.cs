@@ -77,7 +77,7 @@ public static class OperationCancellationPolicyTests
     {
         if (String.IsNullOrWhiteSpace(OperationCancellationPolicy.CancelButtonText))
             throw new InvalidOperationException("The cancel affordance needs a label.");
-        if (OperationCancellationPolicy.CancelButtonText == "一键安装")
+        if (OperationCancellationPolicy.CancelButtonText == "安装")
             throw new InvalidOperationException("The cancel label must differ from the install label.");
         if (String.IsNullOrWhiteSpace(OperationCancellationPolicy.CancelledLogLine))
             throw new InvalidOperationException("A cancellation needs a log line.");

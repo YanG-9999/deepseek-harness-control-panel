@@ -17,6 +17,7 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\StopTargetResolverTests.cs'),
     (Join-Path $projectRoot 'tests\UninstallTargetPlannerTests.cs'),
     (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),
+    (Join-Path $projectRoot 'tests\BrandMarkArtTests.cs'),
     (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
     (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs'),
@@ -30,7 +31,7 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\SingleInstancePolicyTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessStatusChangePolicyTests.cs'),
     (Join-Path $projectRoot 'tests\OperationCancellationPolicyTests.cs'),
-    (Join-Path $projectRoot 'tests\LogSearchPolicyTests.cs'),
+    (Join-Path $projectRoot 'tests\LogExportPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessPortPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\AutoStartAndTrayPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\PanelVersionPolicyTests.cs')
