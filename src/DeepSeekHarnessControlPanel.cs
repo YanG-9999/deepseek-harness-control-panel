@@ -892,6 +892,506 @@ public static class StateSecretProtection
 }
 
 /// <summary>
+/// Measures text so the drawn buttons can size themselves to their content.
+/// </summary>
+public static class UiMeasure
+{
+    /// <summary>
+    /// The width an action button needs: its label, its icon, and the padding around
+    /// both. Measured rather than fixed because the nine action buttons share one row and
+    /// their labels differ a lot in length.
+    /// </summary>
+    public static int MeasureButtonWidth(string text, string glyph)
+    {
+        Size textSize = TextRenderer.MeasureText(text ?? "", UiStyle.ButtonFont());
+        int width = textSize.Width + UiStyle.ButtonPadding;
+        if (!String.IsNullOrEmpty(glyph))
+            width += UiStyle.IconSize + UiStyle.IconGap;
+        return Math.Max(width, 84);
+    }
+
+    /// <summary>
+    /// The width a log toolbar button needs, which is tighter: five of them share a row
+    /// with the search box.
+    /// </summary>
+    public static int MeasureToolbarButtonWidth(string text, string glyph)
+    {
+        Size textSize = TextRenderer.MeasureText(text ?? "", UiStyle.ButtonFont());
+        int width = textSize.Width + 22;
+        if (!String.IsNullOrEmpty(glyph))
+            width += UiStyle.IconSize + 6;
+        return Math.Max(width, 34);
+    }
+}
+
+/// <summary>
+/// Shared geometry. Small helpers so the drawn shapes agree everywhere.
+/// </summary>
+public static class UiShapes
+{
+    /// <summary>A rounded rectangle path, used by every card, chip, and button.</summary>
+    public static System.Drawing.Drawing2D.GraphicsPath RoundedRect(Rectangle bounds, int radius)
+    {
+        var path = new System.Drawing.Drawing2D.GraphicsPath();
+        int diameter = Math.Max(1, radius * 2);
+        if (diameter > bounds.Width) diameter = bounds.Width;
+        if (diameter > bounds.Height) diameter = bounds.Height;
+        var arc = new Rectangle(bounds.Location, new Size(diameter, diameter));
+        path.AddArc(arc, 180, 90);
+        arc.X = bounds.Right - diameter;
+        path.AddArc(arc, 270, 90);
+        arc.Y = bounds.Bottom - diameter;
+        path.AddArc(arc, 0, 90);
+        arc.X = bounds.Left;
+        path.AddArc(arc, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    /// <summary>
+    /// Fills a rounded rectangle and optionally strokes it. The path is disposed here
+    /// because callers would otherwise leak one GDI+ object per repaint.
+    /// </summary>
+    public static void DrawRounded(
+        Graphics graphics,
+        Rectangle bounds,
+        int radius,
+        Color fill,
+        Color border,
+        int borderWidth)
+    {
+        // Inset by the border width so the stroke is not clipped by the bounds.
+        var target = new Rectangle(
+            bounds.X + borderWidth,
+            bounds.Y + borderWidth,
+            Math.Max(1, bounds.Width - (borderWidth * 2)),
+            Math.Max(1, bounds.Height - (borderWidth * 2)));
+        using (System.Drawing.Drawing2D.GraphicsPath path = RoundedRect(target, radius))
+        {
+            using (var brush = new SolidBrush(fill))
+                graphics.FillPath(brush, path);
+            if (borderWidth > 0)
+            {
+                using (var pen = new Pen(border, borderWidth))
+                    graphics.DrawPath(pen, path);
+            }
+        }
+    }
+}
+
+/// <summary>
+/// A white rounded card with a hairline border, matching the grouped panels in the
+/// design. WinForms panels are square, so the shape is painted rather than configured.
+/// </summary>
+public sealed class UiCardPanel : Panel
+{
+    public int CornerRadius { get; set; }
+    public Color BorderColor { get; set; }
+
+    public UiCardPanel()
+    {
+        CornerRadius = UiStyle.CardRadius;
+        BorderColor = UiStyle.CardBorder;
+        BackColor = UiStyle.WindowBackground;
+        // The card paints its own background; double buffering stops the flicker that
+        // comes with repainting a custom surface on every layout pass.
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        // Paint the window colour first, then the card inset by one pixel so the
+        // hairline border is not half-clipped at the edges.
+        using (var background = new SolidBrush(BackColor))
+            e.Graphics.FillRectangle(background, ClientRectangle);
+
+        var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
+        UiShapes.DrawRounded(e.Graphics, bounds, CornerRadius, Color.White, BorderColor, 1);
+        base.OnPaint(e);
+    }
+}
+
+/// <summary>
+/// A value shown in a rounded tinted chip with a status dot, the pattern the design uses
+/// for the state fields. A Label cannot paint a rounded fill, so the shape is drawn.
+/// </summary>
+public sealed class UiValueChip : Label
+{
+    private Color fill = UiStyle.SuccessFill;
+    private Color dot = UiStyle.Success;
+
+    public UiValueChip()
+    {
+        AutoSize = false;
+        DoubleBuffered = true;
+        BackColor = UiStyle.CardBackground;
+        TextAlign = ContentAlignment.MiddleLeft;
+        Font = UiStyle.BodyFont();
+        Padding = new Padding(34, 0, 16, 0);
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    /// <summary>Sets the chip tint, the dot colour, and the text colour together.</summary>
+    public void SetTone(Color chipFill, Color dotColor, Color textColor)
+    {
+        fill = chipFill;
+        dot = dotColor;
+        ForeColor = textColor;
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var background = new SolidBrush(Parent == null ? UiStyle.CardBackground : Parent.BackColor))
+            e.Graphics.FillRectangle(background, ClientRectangle);
+
+        // The chip hugs its content rather than filling the cell, as in the design.
+        Size textSize = TextRenderer.MeasureText(Text, Font);
+        int width = Math.Min(Width, textSize.Width + Padding.Left + Padding.Right);
+        var bounds = new Rectangle(0, 0, Math.Max(40, width) - 1, Height - 1);
+        UiShapes.DrawRounded(e.Graphics, bounds, UiStyle.FieldRadius, fill, fill, 0);
+
+        const int dotSize = 8;
+        int dotY = (Height - dotSize) / 2;
+        using (var brush = new SolidBrush(dot))
+            e.Graphics.FillEllipse(brush, 14, dotY, dotSize, dotSize);
+
+        TextRenderer.DrawText(
+            e.Graphics,
+            Text,
+            Font,
+            new Rectangle(Padding.Left, 0, Math.Max(1, bounds.Width - Padding.Left - 6), Height),
+            ForeColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>
+/// A flat button in the two styles the design uses: a solid primary action and a
+/// bordered secondary one. Standard WinForms buttons cannot be restyled to this shape.
+/// </summary>
+public sealed class UiFlatButton : Button
+{
+    public bool IsPrimary { get; set; }
+
+    /// <summary>An icon glyph from Segoe MDL2 Assets, or empty for no icon.</summary>
+    public string Glyph { get; set; }
+
+    private bool hovered;
+    private bool pressed;
+
+    public UiFlatButton()
+    {
+        Glyph = "";
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        UseVisualStyleBackColor = false;
+        DoubleBuffered = true;
+        Cursor = Cursors.Hand;
+        Font = UiStyle.ButtonFont();
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        hovered = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        hovered = false;
+        pressed = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        pressed = true;
+        Invalidate();
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        pressed = false;
+        Invalidate();
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+        Color fill;
+        Color text;
+        Color border;
+
+        if (!Enabled)
+        {
+            // The design shows a disabled action as a pale filled button with grey text.
+            fill = UiStyle.DisabledFill;
+            text = UiStyle.DisabledText;
+            border = UiStyle.DisabledFill;
+        }
+        else if (IsPrimary)
+        {
+            fill = pressed ? UiStyle.PrimaryPressed : (hovered ? UiStyle.PrimaryHover : UiStyle.Primary);
+            text = Color.White;
+            border = fill;
+        }
+        else
+        {
+            fill = pressed ? UiStyle.SecondaryPressed : (hovered ? UiStyle.SecondaryHover : Color.White);
+            text = UiStyle.TextPrimary;
+            border = UiStyle.SecondaryBorder;
+        }
+
+        using (var background = new SolidBrush(Parent == null ? UiStyle.WindowBackground : Parent.BackColor))
+            e.Graphics.FillRectangle(background, ClientRectangle);
+
+        var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
+        UiShapes.DrawRounded(e.Graphics, bounds, UiStyle.ButtonRadius, fill, border, 1);
+
+        // Icon and label are laid out as one centred group, as in the design.
+        bool hasGlyph = !String.IsNullOrEmpty(Glyph);
+        Size textSize = TextRenderer.MeasureText(Text, Font);
+        int gap = hasGlyph ? 6 : 0;
+        int iconWidth = hasGlyph ? UiStyle.IconSize : 0;
+        int totalWidth = iconWidth + gap + textSize.Width;
+        int x = Math.Max(8, (Width - totalWidth) / 2);
+
+        if (hasGlyph)
+        {
+            using (var iconFont = UiStyle.IconFont(UiStyle.IconSize))
+            {
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    Glyph,
+                    iconFont,
+                    new Rectangle(x, 0, iconWidth + 4, Height),
+                    text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            }
+            x += iconWidth + gap;
+        }
+
+        TextRenderer.DrawText(
+            e.Graphics,
+            Text,
+            Font,
+            new Rectangle(x, 0, Math.Max(1, Width - x - 6), Height),
+            text,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>
+/// A status chip: a coloured dot plus text, optionally on a tinted pill. The design
+/// uses this for the installed and running states.
+/// </summary>
+public sealed class UiStatusChip : Control
+{
+    private string chipText = "";
+    private Color dotColor = UiStyle.Success;
+    private Color fill = Color.Transparent;
+    private Color textColor = UiStyle.TextPrimary;
+
+    public UiStatusChip()
+    {
+        DoubleBuffered = true;
+        Font = UiStyle.BodyFont();
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    /// <summary>Sets the label, the dot colour, and the pill tint together.</summary>
+    public void SetStatus(string text, Color dot, Color background, Color foreground)
+    {
+        chipText = text ?? "";
+        dotColor = dot;
+        fill = background;
+        textColor = foreground;
+        Invalidate();
+    }
+
+    public string ChipText { get { return chipText; } }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var background = new SolidBrush(Parent == null ? UiStyle.CardBackground : Parent.BackColor))
+            e.Graphics.FillRectangle(background, ClientRectangle);
+
+        Size textSize = TextRenderer.MeasureText(chipText, Font);
+        const int dotSize = 8;
+        const int gap = 8;
+        const int padX = 10;
+        int contentWidth = dotSize + gap + textSize.Width;
+        int width = fill == Color.Transparent ? contentWidth : contentWidth + (padX * 2);
+        if (width > Width) width = Width;
+        int height = Math.Min(Height, 26);
+        var pill = new Rectangle(0, Math.Max(0, (Height - height) / 2), width, height);
+
+        if (fill != Color.Transparent)
+            UiShapes.DrawRounded(e.Graphics, pill, 13, fill, fill, 0);
+
+        int dotX = pill.X + (fill == Color.Transparent ? 0 : padX);
+        int dotY = pill.Y + (pill.Height - dotSize) / 2;
+        using (var dot = new SolidBrush(dotColor))
+            e.Graphics.FillEllipse(dot, dotX, dotY, dotSize, dotSize);
+
+        TextRenderer.DrawText(
+            e.Graphics,
+            chipText,
+            Font,
+            new Rectangle(dotX + dotSize + gap, pill.Y, Math.Max(1, pill.Right - dotX - dotSize - gap - 4), pill.Height),
+            textColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>
+/// The control panel palette and metrics, taken from the approved design. Kept in one
+/// class so a colour or a size is never guessed at a call site.
+/// </summary>
+public static class UiStyle
+{
+    // Surfaces
+    public static readonly Color WindowBackground = Color.FromArgb(0xF2, 0xF3, 0xF5);
+    public static readonly Color CardBackground = Color.White;
+    public static readonly Color CardBorder = Color.FromArgb(0xE6, 0xE8, 0xEB);
+    public static readonly Color FieldBackground = Color.FromArgb(0xFA, 0xFA, 0xFB);
+    public static readonly Color FieldBorder = Color.FromArgb(0xE6, 0xE8, 0xEB);
+
+    // Text
+    public static readonly Color TextPrimary = Color.FromArgb(0x1D, 0x1D, 0x1F);
+    public static readonly Color TextSecondary = Color.FromArgb(0x86, 0x86, 0x8B);
+    public static readonly Color TextMuted = Color.FromArgb(0x9A, 0xA0, 0xA6);
+
+    // Primary action
+    public static readonly Color Primary = Color.FromArgb(0x3B, 0x7D, 0xE0);
+    public static readonly Color PrimaryHover = Color.FromArgb(0x33, 0x71, 0xD2);
+    public static readonly Color PrimaryPressed = Color.FromArgb(0x2F, 0x6F, 0xCE);
+
+    // Secondary action
+    public static readonly Color SecondaryHover = Color.FromArgb(0xF7, 0xF8, 0xFA);
+    public static readonly Color SecondaryPressed = Color.FromArgb(0xEF, 0xF1, 0xF4);
+    public static readonly Color SecondaryBorder = Color.FromArgb(0xDC, 0xE0, 0xE5);
+    public static readonly Color DisabledFill = Color.FromArgb(0xF5, 0xF6, 0xF7);
+    public static readonly Color DisabledText = Color.FromArgb(0xBF, 0xC4, 0xCA);
+
+    // Status
+    public static readonly Color Success = Color.FromArgb(0x34, 0xC7, 0x59);
+    public static readonly Color SuccessFill = Color.FromArgb(0xE7, 0xF9, 0xEC);
+    public static readonly Color SuccessText = Color.FromArgb(0x1E, 0x8E, 0x3E);
+    public static readonly Color Warning = Color.FromArgb(0xF5, 0x9E, 0x0B);
+    public static readonly Color WarningFill = Color.FromArgb(0xFE, 0xF3, 0xC7);
+    public static readonly Color WarningText = Color.FromArgb(0xB4, 0x53, 0x09);
+    public static readonly Color Danger = Color.FromArgb(0xEF, 0x44, 0x44);
+    public static readonly Color DangerFill = Color.FromArgb(0xFE, 0xE2, 0xE2);
+    public static readonly Color DangerText = Color.FromArgb(0xB9, 0x1C, 0x1C);
+    public static readonly Color Neutral = Color.FromArgb(0x9C, 0xA3, 0xAF);
+    public static readonly Color NeutralFill = Color.FromArgb(0xF2, 0xF3, 0xF5);
+
+    // Metrics from the design
+    public const int OuterMargin = 28;
+    public const int CardGap = 22;
+    public const int CardPadding = 24;
+    public const int CardRadius = 16;
+    public const int ButtonRadius = 12;
+    public const int ButtonHeight = 46;
+    public const int FieldHeight = 44;
+    public const int FieldRadius = 10;
+    public const int ToolButtonHeight = 40;
+    public const int IconSize = 14;
+
+    /// <summary>Space between the icon and its label inside a button.</summary>
+    public const int IconGap = 7;
+
+    /// <summary>Horizontal padding inside an action button, split either side.</summary>
+    public const int ButtonPadding = 24;
+
+    /// <summary>Icon glyphs from Segoe MDL2 Assets, matching the design's icon set.</summary>
+    public const string GlyphInstall = "\uE896";   // download
+    public const string GlyphUninstall = "\uE74D"; // delete
+    public const string GlyphStart = "\uE768";     // play
+    public const string GlyphRestart = "\uE72C";   // refresh
+    public const string GlyphStop = "\uE71A";      // stop
+    public const string GlyphUpdate = "\uE895";    // sync
+    public const string GlyphOpenPage = "\uE8A7";  // open in new window
+    public const string GlyphRescan = "\uE721";    // search
+    public const string GlyphOpenFolder = "\uE8B7";// folder
+    public const string GlyphFindNext = "\uE74B";  // chevron down
+    public const string GlyphFindPrev = "\uE74A";  // chevron up
+    public const string GlyphExport = "\uEDE1";    // export
+    public const string GlyphClear = "\uE74D";     // delete
+    public const string GlyphSearch = "\uE721";    // magnifier
+
+    // Font sizes are converted from the design's CSS pixels to GDI+ points. The two units
+    // are not interchangeable: 1px is 0.75pt at 96 DPI, so writing a pixel size straight
+    // into a Font renders it a third too large and overflows every box.
+    public static Font TitleFont()
+    {
+        return new Font("Microsoft YaHei UI", 16.5F, FontStyle.Bold);   // 22px
+    }
+
+    public static Font SubtitleFont()
+    {
+        return new Font("Microsoft YaHei UI", 9.75F, FontStyle.Regular); // 13px
+    }
+
+    public static Font CardTitleFont()
+    {
+        return new Font("Microsoft YaHei UI", 12F, FontStyle.Bold);      // 16px
+    }
+
+    public static Font BodyFont()
+    {
+        return new Font("Microsoft YaHei UI", 10.5F, FontStyle.Regular); // 14px
+    }
+
+    public static Font ButtonFont()
+    {
+        return new Font("Microsoft YaHei UI", 10.5F, FontStyle.Regular); // 14px
+    }
+
+    public static Font LabelFont()
+    {
+        return new Font("Microsoft YaHei UI", 9.75F, FontStyle.Regular); // 13px
+    }
+
+    /// <summary>
+    /// The log area's font. Monospaced as the design specifies, so the timestamp column
+    /// lines up without relying on tabs.
+    /// </summary>
+    public static Font LogFont()
+    {
+        return new Font("Consolas", 9.75F, FontStyle.Regular);           // 13px
+    }
+
+    /// <summary>
+    /// The icon font at a given size. Falls back to the body font when the Windows icon
+    /// font is unavailable, so a missing font degrades to text rather than to nothing.
+    /// </summary>
+    public static Font IconFont(float size)
+    {
+        try
+        {
+            return new Font("Segoe MDL2 Assets", size, FontStyle.Regular);
+        }
+        catch (ArgumentException)
+        {
+            return BodyFont();
+        }
+    }
+}
+
+/// <summary>
 /// The handful of Win32 calls the panel needs: enumerating top-level windows to find
 /// its own already-running instance, and rendering a window for diagnostics.
 /// </summary>
@@ -1745,28 +2245,31 @@ public sealed class ManagerForm : Form
     private const string NodeIndex = "https://nodejs.org/dist/index.json";
     private const int FallbackMinimumNodeMajor = 20;
     private readonly Label pathBox = new Label();
-    private readonly Label statusLabel = new Label();
-    private readonly Label runningLabel = new Label();
+    private readonly UiValueChip statusLabel = new UiValueChip();
+    private readonly UiValueChip runningLabel = new UiValueChip();
     private readonly Label versionLabel = new Label();
     private readonly RichTextBox logBox = new RichTextBox();
-    private readonly Button installButton = new Button();
-    private readonly Button startButton = new Button();
-    private readonly Button restartButton = new Button();
-    private readonly Button stopButton = new Button();
-    private readonly Button updateButton = new Button();
-    private readonly Button openButton = new Button();
-    private readonly Button rescanButton = new Button();
-    private readonly Button openFolderButton = new Button();
-    private readonly Button uninstallButton = new Button();
-    /// <summary>The port in use, shown read-only: the panel follows the Harness default.</summary>
-    private readonly Label portValueLabel = new Label();
+    private readonly Button installButton = new UiFlatButton();
+    private readonly Button startButton = new UiFlatButton();
+    private readonly Button restartButton = new UiFlatButton();
+    private readonly Button stopButton = new UiFlatButton();
+    private readonly Button updateButton = new UiFlatButton();
+    private readonly Button openButton = new UiFlatButton();
+    private readonly Button rescanButton = new UiFlatButton();
+    private readonly Button openFolderButton = new UiFlatButton();
+    private readonly Button uninstallButton = new UiFlatButton();
+    /// <summary>The port field in the header. Editable, saved on commit.</summary>
+    private readonly TextBox portBox = new TextBox();
 
     private readonly TextBox logSearchBox = new TextBox();
-    private readonly Button logFindNextButton = new Button();
-    private readonly Button logFindPreviousButton = new Button();
-    private readonly Button logExportButton = new Button();
-    private readonly Button logClearButton = new Button();
+    private readonly Button logFindNextButton = new UiFlatButton();
+    private readonly Button logFindPreviousButton = new UiFlatButton();
+    private readonly Button logExportButton = new UiFlatButton();
+    private readonly Button logClearButton = new UiFlatButton();
     private readonly Label logMatchLabel = new Label();
+
+    /// <summary>Header brand mark, drawn from the embedded application icon.</summary>
+    private readonly PictureBox logoBox = new PictureBox();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -1836,15 +2339,21 @@ public sealed class ManagerForm : Form
     {
         Text = "DeepSeek Harness 控制面板";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        Width = 760;
-        Height = 560;
-        MinimumSize = new Size(700, 480);
+        // Sized to the design: the info card needs four columns side by side, and the
+        // action row needs all nine buttons on one line.
+        Width = 1116;
+        Height = 986;
+        MinimumSize = new Size(980, 760);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9F);
 
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
         http.Timeout = TimeSpan.FromMinutes(20);
+
+        // Load the configured port before the UI is built, because the port field is
+        // populated from it during layout.
+        configuredPort = LoadConfiguredPort();
 
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
@@ -1862,6 +2371,7 @@ public sealed class ManagerForm : Form
         FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
 
         BuildTrayIcon();
+
     }
 
     /// <summary>
@@ -1993,14 +2503,14 @@ public sealed class ManagerForm : Form
             string remote = await GetRemoteCommitAsync(branch);
             string local = LocalCommit();
 
-            // The log records every check, including "up to date"; the status area only
-            // speaks up when there is an update worth acting on.
+            // The log records every check, including "up to date". The status area stays
+            // quiet either way: an available update is not worth a permanent marker on a
+            // panel whose job is to report the service's state, and the log is where the
+            // check belongs.
             string forLog = HarnessUpdatePolicy.DescribeAvailabilityForLog(local, remote);
             if (!String.IsNullOrEmpty(forLog))
                 Log("自动检查更新：" + forLog +
                     (HarnessUpdatePolicy.HasUpdate(local, remote) ? "。点击“检查 Harness 更新”即可升级。" : "。"));
-
-            ShowUpdateStatus(HarnessUpdatePolicy.DescribeAvailability(local, remote));
         }
         catch (Exception)
         {
@@ -2013,187 +2523,507 @@ public sealed class ManagerForm : Form
         }
     }
 
-    /// <summary>
-    /// Records the outcome of the automatic update check for the status line.
-    ///
-    /// Kept apart from the version label: that label reports which version is installed,
-    /// and overwriting it with "already up to date" hid the version precisely when the
-    /// user wanted to know it.
-    /// </summary>
-    private void ShowUpdateStatus(string message)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke((Action)delegate { ShowUpdateStatus(message); });
-            return;
-        }
-        updateStatus = message;
-        // Re-apply the status line so the hint appears without waiting for a poll.
-        if (lastSnapshot != null)
-            ApplySnapshot(lastSnapshot);
-    }
-
-    /// <summary>The latest update-check hint, or empty when there is nothing to say.</summary>
-    private string updateStatus = "";
-
     private void BuildUi()
     {
-        var main = new TableLayoutPanel();
-        main.Dock = DockStyle.Fill;
-        main.Padding = new Padding(14);
-        main.RowCount = 7;
-        main.ColumnCount = 1;
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-        // One line tall: the log toolbar is a flat row.
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Controls.Add(main);
+        // The window paints its own flat background; the design has no gradient or
+        // system chrome colour anywhere.
+        BackColor = UiStyle.WindowBackground;
+        Font = UiStyle.BodyFont();
 
-        var pathPanel = new TableLayoutPanel();
-        pathPanel.Dock = DockStyle.Fill;
-        pathPanel.ColumnCount = 4;
-        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
-        pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        var pathLabel = new Label { Text = "安装目录", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        pathBox.Dock = DockStyle.Fill;
+        var root = new TableLayoutPanel();
+        root.Dock = DockStyle.Fill;
+        root.Padding = new Padding(UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin, UiStyle.OuterMargin);
+        root.ColumnCount = 1;
+        root.RowCount = 4;
+        root.BackColor = UiStyle.WindowBackground;
+        // Heights follow the approved design: the header carries a 52px mark, each card
+        // pays 24px padding plus its title, and the log card takes what is left.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 124));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        Controls.Add(root);
+
+        root.Controls.Add(BuildHeader(), 0, 0);
+        root.Controls.Add(BuildInfoCard(), 0, 1);
+        root.Controls.Add(BuildActionCard(), 0, 2);
+        root.Controls.Add(BuildLogCard(), 0, 3);
+    }
+
+    /// <summary>
+    /// Brand mark, product name, tagline, and the read-only port.
+    /// </summary>
+    private Control BuildHeader()
+    {
+        var header = new TableLayoutPanel();
+        header.Dock = DockStyle.Fill;
+        header.ColumnCount = 2;
+        header.RowCount = 1;
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        header.BackColor = UiStyle.WindowBackground;
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+
+        var brand = new TableLayoutPanel();
+        brand.Dock = DockStyle.Fill;
+        brand.ColumnCount = 2;
+        brand.RowCount = 2;
+        brand.BackColor = UiStyle.WindowBackground;
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        brand.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+        brand.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+
+        logoBox.Dock = DockStyle.Fill;
+        logoBox.SizeMode = PictureBoxSizeMode.Zoom;
+        logoBox.BackColor = UiStyle.WindowBackground;
+        try
+        {
+            logoBox.Image = Icon.ExtractAssociatedIcon(Application.ExecutablePath).ToBitmap();
+        }
+        catch (Exception)
+        {
+            // A missing icon must not stop the window from building.
+        }
+        brand.Controls.Add(logoBox, 0, 0);
+        brand.SetRowSpan(logoBox, 2);
+
+        var title = new Label();
+        title.Text = "DeepSeek Harness";
+        title.Font = UiStyle.TitleFont();
+        title.ForeColor = UiStyle.TextPrimary;
+        title.Dock = DockStyle.Fill;
+        title.AutoSize = false;
+        title.TextAlign = ContentAlignment.MiddleLeft;
+        title.BackColor = UiStyle.WindowBackground;
+        brand.Controls.Add(title, 1, 0);
+
+        var tagline = new Label();
+        tagline.Text = "轻量 · 高效 · 稳定";
+        tagline.Font = UiStyle.SubtitleFont();
+        tagline.ForeColor = UiStyle.TextSecondary;
+        tagline.Dock = DockStyle.Fill;
+        tagline.AutoSize = false;
+        tagline.TextAlign = ContentAlignment.MiddleLeft;
+        tagline.BackColor = UiStyle.WindowBackground;
+        brand.Controls.Add(tagline, 1, 1);
+        header.Controls.Add(brand, 0, 0);
+
+        // Port: an editable field, as the design specifies. A change is saved and takes
+        // effect on the next start, which the log states when it happens.
+        //
+        // Positioned absolutely in a plain container rather than through a nested table:
+        // the nested table kept mis-placing the caption and sizing the field oddly, and
+        // this shape has two fixed boxes so a table buys nothing.
+        var portPanel = new Panel();
+        portPanel.Dock = DockStyle.Fill;
+        portPanel.BackColor = UiStyle.WindowBackground;
+
+        var portCaption = new Label();
+        portCaption.Text = "端口";
+        portCaption.Font = UiStyle.BodyFont();
+        portCaption.ForeColor = UiStyle.TextSecondary;
+        portCaption.AutoSize = false;
+        portCaption.TextAlign = ContentAlignment.MiddleRight;
+        portCaption.BackColor = UiStyle.WindowBackground;
+        portCaption.Bounds = new Rectangle(0, 0, 52, 48);
+        portCaption.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        portPanel.Controls.Add(portCaption);
+
+        portBox.Text = Port.ToString();
+        portBox.Font = UiStyle.BodyFont();
+        portBox.ForeColor = UiStyle.TextPrimary;
+        portBox.BackColor = Color.White;
+        portBox.BorderStyle = BorderStyle.FixedSingle;
+        portBox.TextAlign = HorizontalAlignment.Center;
+        portBox.MaxLength = 5;
+        portBox.Bounds = new Rectangle(60, 8, 118, 32);
+        portBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        portBox.Validating += PortBoxValidating;
+        portBox.Validated += PortBoxValidated;
+        portPanel.Controls.Add(portBox);
+
+        header.Controls.Add(portPanel, 1, 0);
+
+        return header;
+    }
+
+    /// <summary>
+    /// Card title with the small accent bar the design puts to its left.
+    /// </summary>
+    private static Control BuildCardTitle(string text)
+    {
+        var row = new TableLayoutPanel();
+        row.Dock = DockStyle.Top;
+        row.Height = 26;
+        row.ColumnCount = 2;
+        row.RowCount = 1;
+        row.BackColor = UiStyle.CardBackground;
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 14));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var accent = new Panel();
+        accent.Dock = DockStyle.Fill;
+        accent.Margin = new Padding(0, 6, 0, 6);
+        accent.BackColor = UiStyle.Primary;
+        // Without a cap the panel keeps its default height and the AutoSize row grows to
+        // fit it, which is why the accent rendered as a block instead of a bar.
+        accent.MaximumSize = new Size(3, 14);
+        row.Controls.Add(accent, 0, 0);
+
+        var label = new Label();
+        label.Text = text;
+        label.Font = UiStyle.CardTitleFont();
+        label.ForeColor = UiStyle.TextPrimary;
+        label.Dock = DockStyle.Fill;
+        label.AutoSize = false;
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        label.BackColor = UiStyle.CardBackground;
+        row.Controls.Add(label, 1, 0);
+        return row;
+    }
+
+    /// <summary>
+    /// A caption plus its value, the pattern the design uses for every fact.
+    ///
+    /// Laid out with absolute positions inside a plain Panel rather than a table: a
+    /// two-row table kept sizing its value row to the label's own height and pushing the
+    /// text below the card, and this shape has two fixed heights so a table buys nothing.
+    /// </summary>
+    private static Control BuildField(string caption, Control value, int captionHeight, int valueHeight)
+    {
+        var field = new Panel();
+        field.Dock = DockStyle.Fill;
+        field.BackColor = UiStyle.CardBackground;
+
+        var captionLabel = new Label();
+        captionLabel.Text = caption;
+        captionLabel.Font = UiStyle.LabelFont();
+        captionLabel.ForeColor = UiStyle.TextSecondary;
+        captionLabel.AutoSize = false;
+        captionLabel.TextAlign = ContentAlignment.MiddleLeft;
+        captionLabel.BackColor = UiStyle.CardBackground;
+        captionLabel.Bounds = new Rectangle(0, 0, 400, captionHeight);
+        captionLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        field.Controls.Add(captionLabel);
+
+        value.Bounds = new Rectangle(0, captionHeight + 8, 400, valueHeight);
+        value.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        field.Controls.Add(value);
+
+        // Stretch both controls to the panel width once it has one; anchoring handles
+        // resizing after that.
+        field.Layout += delegate
+        {
+            int width = Math.Max(40, field.ClientSize.Width);
+            captionLabel.Width = width;
+            value.Width = width;
+        };
+        return field;
+    }
+
+    /// <summary>
+    /// The runtime facts: directory, state, running state, version.
+    /// </summary>
+    private Control BuildInfoCard()
+    {
+        var card = new UiCardPanel();
+        card.Dock = DockStyle.Fill;
+
+        var inside = new TableLayoutPanel();
+        inside.Dock = DockStyle.Fill;
+        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.ColumnCount = 1;
+        inside.RowCount = 2;
+        inside.BackColor = UiStyle.CardBackground;
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        inside.Controls.Add(BuildCardTitle("运行信息"), 0, 0);
+
+        var cells = new TableLayoutPanel();
+        cells.Dock = DockStyle.Fill;
+        cells.ColumnCount = 4;
+        cells.RowCount = 1;
+        cells.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        cells.BackColor = UiStyle.CardBackground;
+        // Column widths follow the design: the directory and the version are the wide
+        // input-style fields, the two state chips are narrower.
+        cells.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
+        cells.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        cells.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        cells.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        // The design gives every fact the same field height: values that are plain text sit
+        // in a bordered box, states sit in a tinted chip with a dot.
         pathBox.TextAlign = ContentAlignment.MiddleLeft;
-        pathBox.AutoEllipsis = true;
-        // The percentage column can collapse to a minimum, so each flexible control
-        // states the width below which it stops being usable.
-        pathBox.MinimumSize = new Size(200, 0);
-        pathPanel.Controls.Add(pathLabel, 0, 0);
-        pathPanel.Controls.Add(pathBox, 1, 0);
-        // The port is shown, not edited: the panel follows the Harness default, so an
-        // editable box only invited a change that would not take effect on a running
-        // instance. The value stays parameterised internally, so adding an entry point
-        // later does not mean re-hard-coding 3080 across the panel.
-        var portLabel = new Label { Text = "端口", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
-        pathPanel.Controls.Add(portLabel, 2, 0);
-        portValueLabel.Dock = DockStyle.Fill;
-        portValueLabel.TextAlign = ContentAlignment.MiddleLeft;
-        portValueLabel.Text = Port.ToString();
-        pathPanel.Controls.Add(portValueLabel, 3, 0);
-        main.Controls.Add(pathPanel, 0, 0);
+        pathBox.Font = UiStyle.BodyFont();
+        pathBox.AutoSize = false;
+        pathBox.BackColor = UiStyle.FieldBackground;
+        pathBox.Padding = new Padding(10, 0, 10, 0);
 
-        var statePanel = new TableLayoutPanel();
-        statePanel.Dock = DockStyle.Fill;
-        statePanel.ColumnCount = 2;
-        statePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        statePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        statePanel.Controls.Add(new Label { Text = "状态", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        statusLabel.Dock = DockStyle.Fill;
-        statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-        statePanel.Controls.Add(statusLabel, 1, 0);
-        main.Controls.Add(statePanel, 0, 1);
-
-        var runningPanel = new TableLayoutPanel();
-        runningPanel.Dock = DockStyle.Fill;
-        runningPanel.ColumnCount = 2;
-        runningPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        runningPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        runningPanel.Controls.Add(new Label { Text = "运行状态", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        runningLabel.Dock = DockStyle.Fill;
-        runningLabel.TextAlign = ContentAlignment.MiddleLeft;
-        runningPanel.Controls.Add(runningLabel, 1, 0);
-        main.Controls.Add(runningPanel, 0, 2);
-
-        var infoPanel = new TableLayoutPanel();
-        infoPanel.Dock = DockStyle.Fill;
-        infoPanel.ColumnCount = 2;
-        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        infoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        infoPanel.Controls.Add(new Label { Text = "Harness 版本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        versionLabel.Dock = DockStyle.Fill;
+        versionLabel.Font = UiStyle.BodyFont();
+        versionLabel.AutoSize = false;
+        versionLabel.BackColor = UiStyle.FieldBackground;
+        versionLabel.ForeColor = UiStyle.TextPrimary;
         versionLabel.TextAlign = ContentAlignment.MiddleLeft;
-        // The update hint and the plain version share this line, so give it room on
-        // wide windows instead of clipping the longer of the two.
+        versionLabel.Padding = new Padding(12, 0, 12, 0);
         versionLabel.AutoEllipsis = true;
-        // Same reason as the log search box: a percentage column can collapse, and the
-        // update hint is the longest text this label ever shows.
-        versionLabel.MinimumSize = new Size(260, 0);
-        infoPanel.Controls.Add(versionLabel, 1, 0);
-        main.Controls.Add(infoPanel, 0, 3);
+
+        cells.Controls.Add(BuildField("安装目录", pathBox, 24, UiStyle.FieldHeight), 0, 0);
+        cells.Controls.Add(BuildField("状态", statusLabel, 24, UiStyle.FieldHeight), 1, 0);
+        cells.Controls.Add(BuildField("运行状态", runningLabel, 24, UiStyle.FieldHeight), 2, 0);
+        cells.Controls.Add(BuildField("Harness 版本", versionLabel, 24, UiStyle.FieldHeight), 3, 0);
+        inside.Controls.Add(cells, 0, 1);
+        card.Controls.Add(inside);
+        return card;
+    }
+
+    /// <summary>
+    /// The action buttons, split into the primary install action and the rest.
+    /// </summary>
+    private Control BuildActionCard()
+    {
+        var card = new UiCardPanel();
+        card.Dock = DockStyle.Fill;
+
+        var inside = new TableLayoutPanel();
+        inside.Dock = DockStyle.Fill;
+        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.ColumnCount = 1;
+        inside.RowCount = 2;
+        inside.BackColor = UiStyle.CardBackground;
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        inside.Controls.Add(BuildCardTitle("操作"), 0, 0);
 
         var buttons = new FlowLayoutPanel();
         buttons.Dock = DockStyle.Fill;
-        buttons.WrapContents = true;
+        buttons.WrapContents = false;
         buttons.AutoScroll = false;
         buttons.FlowDirection = FlowDirection.LeftToRight;
-        AddButton(buttons, installButton, "一键安装", InstallClick);
-        AddButton(buttons, uninstallButton, "彻底卸载", UninstallClick);
-        AddButton(buttons, startButton, "启动", StartClick);
-        AddButton(buttons, restartButton, "重启", RestartClick);
-        AddButton(buttons, stopButton, "停止", StopClick);
-        AddButton(buttons, updateButton, "检查 Harness 更新", UpdateClick);
-        AddButton(buttons, openButton, "打开页面", OpenClick);
-        AddButton(buttons, rescanButton, "重新扫描", RescanClick);
-        AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
-        main.Controls.Add(buttons, 0, 4);
+        buttons.BackColor = UiStyle.CardBackground;
 
-        // Log toolbar: without these the only way to share a failure was to drag-select
-        // the text box by hand.
-        var logTools = new TableLayoutPanel();
-        logTools.Dock = DockStyle.Fill;
-        logTools.ColumnCount = 7;
-        // Fixed columns total 446 of the 710 available; the rest goes to the search box,
-        // which needs about 260px to show its placeholder and a realistic query.
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
-        logTools.Controls.Add(new Label { Text = "日志", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        StyleActionButton(installButton, "一键安装", UiStyle.GlyphInstall, true, InstallClick);
+        StyleActionButton(uninstallButton, "彻底卸载", UiStyle.GlyphUninstall, false, UninstallClick);
+        StyleActionButton(startButton, "启动", UiStyle.GlyphStart, false, StartClick);
+        StyleActionButton(restartButton, "重启", UiStyle.GlyphRestart, false, RestartClick);
+        StyleActionButton(stopButton, "停止", UiStyle.GlyphStop, false, StopClick);
+        StyleActionButton(updateButton, "检查更新", UiStyle.GlyphUpdate, false, UpdateClick);
+        StyleActionButton(openButton, "打开页面", UiStyle.GlyphOpenPage, false, OpenClick);
+        StyleActionButton(rescanButton, "重新扫描", UiStyle.GlyphRescan, false, RescanClick);
+        StyleActionButton(openFolderButton, "打开目录", UiStyle.GlyphOpenFolder, false, OpenFolderClick);
 
-        logSearchBox.Dock = DockStyle.Fill;
-        // A percentage column alone collapsed this to its minimum width in practice;
-        // an explicit floor guarantees the box stays usable for a real search term.
-        logSearchBox.MinimumSize = new Size(220, 0);
-        logSearchBox.TextChanged += delegate { ApplyLogHighlight(); };
-        logTools.Controls.Add(logSearchBox, 1, 0);
+        buttons.Controls.Add(installButton);
+        buttons.Controls.Add(uninstallButton);
+        buttons.Controls.Add(startButton);
+        buttons.Controls.Add(restartButton);
+        buttons.Controls.Add(stopButton);
+        buttons.Controls.Add(updateButton);
+        buttons.Controls.Add(openButton);
+        buttons.Controls.Add(rescanButton);
+        buttons.Controls.Add(openFolderButton);
+        inside.Controls.Add(buttons, 0, 1);
+        card.Controls.Add(inside);
+        return card;
+    }
 
-        AddButton(logTools, logFindPreviousButton, "上一个", LogFindPreviousClick);
-        logTools.Controls.Add(logFindPreviousButton, 2, 0);
+    /// <summary>
+    /// Replaces a Button with the flat design and wires its click handler.
+    ///
+    /// The fields are declared as Button, so a UiFlatButton instance is assigned through
+    /// the base type and the designer-only properties are set on it directly.
+    /// </summary>
+    private static void StyleActionButton(
+        Button button,
+        string text,
+        string glyph,
+        bool primary,
+        EventHandler handler)
+    {
+        var flat = button as UiFlatButton;
+        if (flat == null)
+            throw new InvalidOperationException("Action buttons must be created as UiFlatButton.");
+        flat.Text = text;
+        flat.Glyph = glyph;
+        flat.IsPrimary = primary;
+        flat.AutoSize = false;
+        flat.Height = UiStyle.ButtonHeight;
+        flat.Width = UiMeasure.MeasureButtonWidth(text, glyph);
+        flat.Margin = new Padding(0, 0, 7, 0);
+        flat.Click += handler;
+    }
 
-        logMatchLabel.Dock = DockStyle.Fill;
-        logMatchLabel.TextAlign = ContentAlignment.MiddleCenter;
-        logMatchLabel.ForeColor = Color.DimGray;
-        logTools.Controls.Add(logMatchLabel, 3, 0);
+    /// <summary>
+    /// The log card: title, the search and export controls, then the log itself.
+    /// </summary>
+    private Control BuildLogCard()
+    {
+        var card = new UiCardPanel();
+        card.Dock = DockStyle.Fill;
 
-        AddButton(logTools, logFindNextButton, "下一个", LogFindNextClick);
-        logTools.Controls.Add(logFindNextButton, 4, 0);
+        var inside = new TableLayoutPanel();
+        inside.Dock = DockStyle.Fill;
+        inside.Padding = new Padding(UiStyle.CardPadding, 18, UiStyle.CardPadding, 18);
+        inside.ColumnCount = 1;
+        inside.RowCount = 3;
+        inside.BackColor = UiStyle.CardBackground;
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        AddButton(logTools, logExportButton, "导出", LogExportClick);
-        logTools.Controls.Add(logExportButton, 5, 0);
+        // Title and the toolbar share one row, as in the design.
+        var titleRow = new TableLayoutPanel();
+        titleRow.Dock = DockStyle.Fill;
+        titleRow.ColumnCount = 2;
+        titleRow.RowCount = 1;
+        titleRow.BackColor = UiStyle.CardBackground;
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        // Wide enough for the search box plus its five buttons; a narrower reservation
+        // pushed the last button off the card.
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 734));
+        titleRow.Controls.Add(BuildCardTitle("运行日志"), 0, 0);
+        titleRow.Controls.Add(BuildLogToolbar(), 1, 0);
+        inside.Controls.Add(titleRow, 0, 0);
 
-        AddButton(logTools, logClearButton, "清空", LogClearClick);
-        logTools.Controls.Add(logClearButton, 6, 0);
-
-        logTools.CellPaint += DrawPlaceholder;
-        main.Controls.Add(logTools, 0, 5);
+        inside.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = UiStyle.CardBackground }, 0, 1);
 
         logBox.ReadOnly = true;
         logBox.ScrollBars = RichTextBoxScrollBars.Vertical;
         logBox.WordWrap = true;
         logBox.HideSelection = false;
         logBox.Dock = DockStyle.Fill;
-        logBox.BackColor = Color.White;
-        main.Controls.Add(logBox, 0, 6);
+        logBox.BorderStyle = BorderStyle.None;
+        logBox.BackColor = UiStyle.CardBackground;
+        logBox.Font = UiStyle.LogFont();
+        // Two aligned columns: the timestamp then the message, as the design shows.
+        logBox.SelectionTabs = new[] { 76, 320, 560 };
+        inside.Controls.Add(logBox, 0, 2);
+        card.Controls.Add(inside);
+        return card;
+    }
 
-        // Align the boxes and labels vertically with the buttons beside them. Sizing
-        // alone is not enough: a 36px label in a 56px row drifts away from the 30px
-        // button next to it unless the anchor is cleared and the offset applied.
-        AlignMiddleFor(pathPanel);
-        AlignMiddleFor(infoPanel);
-        AlignMiddle(logSearchBox);
-        AlignMiddle(logMatchLabel);
+    private Control BuildLogToolbar()
+    {
+        // A right-to-left flow rather than a table: the buttons are added in reverse and
+        // take their measured widths from the right edge, and the search box docks last so
+        // it receives whatever space remains. A table produced either clipped buttons
+        // (fixed columns) or a collapsed search box (auto-size columns).
+        var toolbar = new FlowLayoutPanel();
+        // Docked right rather than anchored: anchoring used the width at construction time
+        // to compute the offset, so the toolbar was placed to the left of where its cell
+        // ended and the rightmost buttons fell outside the card.
+        toolbar.Dock = DockStyle.Right;
+        toolbar.Height = UiStyle.ToolButtonHeight + 2;
+        toolbar.Width = 730;
+        toolbar.FlowDirection = FlowDirection.RightToLeft;
+        toolbar.WrapContents = false;
+        toolbar.AutoScroll = false;
+        toolbar.BackColor = UiStyle.CardBackground;
+
+        // In a right-to-left flow the first control added sits furthest right. The intended
+        // left-to-right order is 上一个, 下一个, 导出, 清空, so they are added reversed.
+        StyleToolbarButton(logClearButton, "清空", UiStyle.GlyphClear, LogClearClick);
+        toolbar.Controls.Add(logClearButton);
+        StyleToolbarButton(logExportButton, "导出", UiStyle.GlyphExport, LogExportClick);
+        toolbar.Controls.Add(logExportButton);
+        StyleToolbarIconButton(logFindNextButton, "下一个", UiStyle.GlyphFindNext, LogFindNextClick);
+        toolbar.Controls.Add(logFindNextButton);
+        StyleToolbarIconButton(logFindPreviousButton, "上一个", UiStyle.GlyphFindPrev, LogFindPreviousClick);
+        toolbar.Controls.Add(logFindPreviousButton);
+
+        // The match count sits left of the buttons and is only as wide as it needs.
+        logMatchLabel.AutoSize = false;
+        logMatchLabel.Font = UiStyle.LabelFont();
+        logMatchLabel.ForeColor = UiStyle.TextSecondary;
+        logMatchLabel.BackColor = UiStyle.CardBackground;
+        logMatchLabel.TextAlign = ContentAlignment.MiddleLeft;
+        logMatchLabel.Height = UiStyle.ToolButtonHeight;
+        logMatchLabel.Width = 84;
+        logMatchLabel.Margin = new Padding(2, 0, 4, 0);
+        toolbar.Controls.Add(logMatchLabel);
+
+        // A host so the search box can stretch while keeping a preferred height: a TextBox
+        // in a flow panel ignores Dock when AutoSize is off unless it has a container.
+        var searchHost = new Panel();
+        searchHost.Height = UiStyle.ToolButtonHeight;
+        searchHost.Width = 340;
+        searchHost.Margin = new Padding(0, 0, 4, 0);
+        searchHost.BackColor = UiStyle.CardBackground;
+
+        logSearchBox.Font = UiStyle.BodyFont();
+        logSearchBox.BorderStyle = BorderStyle.FixedSingle;
+        logSearchBox.TextChanged += delegate { ApplyLogHighlight(); };
+        logSearchBox.Location = new Point(0, 8);
+        logSearchBox.Width = 336;
+        logSearchBox.Height = 24;
+        logSearchBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        searchHost.Controls.Add(logSearchBox);
+
+        // A transparent overlay draws the hint: WinForms text boxes have no placeholder,
+        // and a painter sibling is simpler than subclassing the control.
+        var hint = new Label();
+        hint.AutoSize = false;
+        hint.Bounds = new Rectangle(8, 8, 328, 24);
+        hint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        hint.BackColor = Color.Transparent;
+        hint.ForeColor = UiStyle.TextSecondary;
+        hint.Font = UiStyle.BodyFont();
+        hint.TextAlign = ContentAlignment.MiddleLeft;
+        hint.Text = LogSearchPolicy.SearchPlaceholder;
+        hint.Cursor = Cursors.IBeam;
+        hint.Click += delegate { logSearchBox.Focus(); };
+        searchHost.Controls.Add(hint);
+        hint.BringToFront();
+
+        Action syncHint = delegate
+        {
+            hint.Visible = logSearchBox.TextLength == 0;
+            hint.Width = Math.Max(10, searchHost.ClientSize.Width - 8);
+        };
+        logSearchBox.TextChanged += delegate { syncHint(); };
+        searchHost.Resize += delegate { syncHint(); };
+        syncHint();
+
+        toolbar.Controls.Add(searchHost);
+        toolbar.Resize += delegate
+        {
+            // The flow panel gives the last control the remaining width, so keep the host
+            // in step with it.
+            searchHost.Width = Math.Max(120, searchHost.Width);
+        };
+        return toolbar;
+    }
+
+    /// <summary>
+    /// A toolbar button that shows only its icon. The label goes to the tooltip, which is
+    /// how the design presents the navigation buttons.
+    /// </summary>
+    private static void StyleToolbarIconButton(Button button, string label, string glyph, EventHandler handler)
+    {
+        StyleToolbarButton(button, "", glyph, handler);
+        var flat = button as UiFlatButton;
+        flat.Width = 44;
+        // An icon-only button has no visible label, so the name lives in the accessibility
+        // tree and the tooltip; a screen reader and the layout test both read it there.
+        flat.AccessibleName = label;
+        var tip = new ToolTip();
+        tip.SetToolTip(flat, label);
+    }
+
+    private static void StyleToolbarButton(Button button, string text, string glyph, EventHandler handler)
+    {
+        var flat = button as UiFlatButton;
+        if (flat == null)
+            throw new InvalidOperationException("Log toolbar buttons must be created as UiFlatButton.");
+        flat.Text = text;
+        flat.Glyph = glyph;
+        flat.IsPrimary = false;
+        // Sized to its own label: a fixed width clipped "上一个" to "上...".
+        flat.AutoSize = false;
+        flat.Height = UiStyle.ToolButtonHeight;
+        flat.Width = UiMeasure.MeasureToolbarButtonWidth(text, glyph);
+        flat.Margin = new Padding(0, 2, 4, 0);
+        flat.Click += handler;
     }
 
     private void AddButton(Control parent, Button button, string text, EventHandler handler)
@@ -2789,7 +3619,7 @@ public sealed class ManagerForm : Form
             : (snapshot.Installed && !snapshot.Ready ? "修复安装" : "一键安装");
         updateButton.Text = cancellable
             ? OperationCancellationPolicy.CancelButtonText
-            : "检查 Harness 更新";
+            : "检查更新";
 
         // Every other action is disabled first, so no state can leave one of them live
         // during an operation. That also makes the early return below safe.
@@ -2919,19 +3749,17 @@ public sealed class ManagerForm : Form
     /// <summary>Applies a snapshot to the three state labels.</summary>
     private void ApplySnapshot(HarnessStatusSnapshot snapshot)
     {
-        // The status line carries the update hint as a suffix, so the version label can
-        // stay a plain version number.
-        statusLabel.Text = String.IsNullOrEmpty(updateStatus)
-            ? snapshot.StatusText
-            : snapshot.StatusText + "  ·  " + updateStatus;
+        statusLabel.Text = snapshot.StatusText;
         runningLabel.Text = snapshot.RunningText;
-        // The version is only meaningful for a single resolved install.
         versionLabel.Text = snapshot.Installed && !snapshot.MultipleInstalls
             ? HarnessVersionText.ForDisplay(snapshot.Version)
             : "";
 
-        // The tray tooltip is the only state information visible while the window is
-        // hidden, so it tracks the same snapshot.
+        // Tint each state field to match its meaning, the way the design shows a green
+        // chip for a healthy state and a warning colour for a foreign port.
+        TintState(statusLabel, snapshot.StatusText);
+        TintState(runningLabel, snapshot.RunningText);
+
         try
         {
             trayIcon.Text = TrayClosePolicy.BuildTooltip(snapshot.Running, Port, snapshot.Version);
@@ -2940,6 +3768,34 @@ public sealed class ManagerForm : Form
         {
             // A tooltip longer than the platform limit throws; the panel must survive it.
         }
+    }
+
+    /// <summary>
+    /// Colours a state field from its own wording, so the labels and the colours can
+    /// never disagree about what the state is.
+    /// </summary>
+    private static void TintState(UiValueChip chip, string text)
+    {
+        string value = text ?? "";
+        if (value.IndexOf("多个", StringComparison.Ordinal) >= 0 ||
+            value.IndexOf("不完整", StringComparison.Ordinal) >= 0)
+        {
+            chip.SetTone(UiStyle.WarningFill, UiStyle.Warning, UiStyle.WarningText);
+            return;
+        }
+        if (value.IndexOf("占用", StringComparison.Ordinal) >= 0)
+        {
+            chip.SetTone(UiStyle.DangerFill, UiStyle.Danger, UiStyle.DangerText);
+            return;
+        }
+        if (value.IndexOf("已安装", StringComparison.Ordinal) >= 0 ||
+            value.IndexOf("正在运行", StringComparison.Ordinal) >= 0)
+        {
+            chip.SetTone(UiStyle.SuccessFill, UiStyle.Success, UiStyle.SuccessText);
+            return;
+        }
+        // "未安装" and "未运行" are neutral, not failures.
+        chip.SetTone(UiStyle.NeutralFill, UiStyle.Neutral, UiStyle.TextSecondary);
     }
 
     /// <summary>
@@ -4566,13 +5422,71 @@ public sealed class ManagerForm : Form
     /// <summary>
     /// The port Harness is launched on and probed at.
     ///
-    /// Fixed to the Harness default: the panel is a launcher for a service the user runs
-    /// on its default port, and an editable setting only invited a change that would not
-    /// affect an already-running instance. It stays a single value behind a property so
-    /// the sixteen call sites are not tied to the literal, and adding an entry point
-    /// later does not mean touching them all again.
+    /// Read from settings at construction and written back when the field is committed, so
+    /// sixteen call sites are not tied to the literal and a change takes effect on the
+    /// next start rather than mid-operation.
     /// </summary>
-    private int Port { get { return HarnessPortPolicy.DefaultPort; } }
+    private int Port { get { return configuredPort; } }
+
+    private int configuredPort = HarnessPortPolicy.DefaultPort;
+
+    private int LoadConfiguredPort()
+    {
+        if (!File.Exists(SettingsFile))
+            return HarnessPortPolicy.DefaultPort;
+        string raw = ReadJsonValue(File.ReadAllText(SettingsFile), "harnessPort");
+        int parsed;
+        if (Int32.TryParse(raw, out parsed) && HarnessPortPolicy.IsValid(parsed))
+            return parsed;
+        // A corrupt or out-of-range value falls back rather than failing to start.
+        return HarnessPortPolicy.DefaultPort;
+    }
+
+    /// <summary>
+    /// Rejects an unusable port before it is saved. Leaving the box in an invalid state
+    /// would let the panel launch Harness on a port it cannot then probe.
+    /// </summary>
+    private void PortBoxValidating(object sender, System.ComponentModel.CancelEventArgs e)
+    {
+        int port;
+        string error;
+        if (HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
+            return;
+        e.Cancel = true;
+        MessageBox.Show(this, error, "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// Persists a changed port. The running service is not moved: a port change takes
+    /// effect on the next start, which the log states plainly.
+    /// </summary>
+    private void PortBoxValidated(object sender, EventArgs e)
+    {
+        int port;
+        string error;
+        if (!HarnessPortPolicy.TryParse(portBox.Text, out port, out error))
+        {
+            portBox.Text = Port.ToString();
+            return;
+        }
+        if (port == configuredPort)
+            return;
+
+        int previous = configuredPort;
+        configuredPort = port;
+        try
+        {
+            SaveSetting("harnessPort", port.ToString());
+        }
+        catch (Exception ex)
+        {
+            Log("保存端口设置失败: " + ex.Message);
+        }
+        Log("监听端口已从 " + previous + " 改为 " + port + "（下次启动生效）。");
+        if (lastSnapshot != null && lastSnapshot.Running)
+            Log("Harness 当前仍在 " + previous + " 端口运行；点击“重启”后才会切换。");
+        RefreshState();
+    }
 
     private bool IsConfiguredRoot()
     {
@@ -4600,6 +5514,9 @@ public sealed class ManagerForm : Form
             string current = ReadJsonValue(File.ReadAllText(SettingsFile), "installRoot");
             if (!String.IsNullOrEmpty(current))
                 settings["installRoot"] = current;
+            string savedPort = ReadJsonValue(File.ReadAllText(SettingsFile), "harnessPort");
+            if (!String.IsNullOrEmpty(savedPort))
+                settings["harnessPort"] = savedPort;
         }
         settings[key] = value ?? "";
 

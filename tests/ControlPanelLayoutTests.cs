@@ -10,8 +10,10 @@ public static class ControlPanelLayoutTests
             FlowLayoutPanel buttons = FindFlowLayout(form);
             if (buttons == null)
                 throw new InvalidOperationException("Button panel was not found.");
-            if (!buttons.WrapContents)
-                throw new InvalidOperationException("Button panel must wrap onto multiple rows.");
+            // The approved design puts all nine actions on one row, so the panel must not
+            // wrap. It previously wrapped, which is what the assertion here used to require.
+            if (buttons.WrapContents)
+                throw new InvalidOperationException("Button panel must keep every action on one row.");
             if (buttons.AutoScroll)
                 throw new InvalidOperationException("Button panel must not show scrollbars.");
             if (buttons.Controls.Count != 9)
@@ -24,25 +26,32 @@ public static class ControlPanelLayoutTests
     }
 
     /// <summary>
-    /// The version row shows the installed version. It must be a version number: it used
-    /// to be overwritten by the update-check result, and it also carried an auto-start
-    /// switch that has since been removed.
+    /// The version field holds a version number and nothing else. It used to be overwritten
+    /// by the update-check result, and the same area once carried an auto-start switch.
     /// </summary>
     private static void VerifyVersionRowExists(Control form)
     {
-        TableLayoutPanel row = FindRowContainingLabel(form, "Harness 版本");
-        if (row == null)
-            throw new InvalidOperationException("The version row was not found.");
-        if (row.Controls.Count != 2)
-            throw new InvalidOperationException(
-                "The version row must hold the label and the version, got " + row.Controls.Count + ".");
+        if (FindLabelByText(form, "Harness 版本") == null)
+            throw new InvalidOperationException("The runtime-information card needs a version caption.");
 
-        foreach (Control child in row.Controls)
+        // The version itself carries the display prefix, so it reads as a version number.
+        bool foundVersion = false;
+        var all = new System.Collections.Generic.List<Control>();
+        Collect(form, all);
+        foreach (Control control in all)
         {
-            if (child is CheckBox)
+            if (control is CheckBox)
                 throw new InvalidOperationException(
-                    "The auto-start switch was removed on purpose; the version row holds no controls of its own.");
+                    "The auto-start switch was removed on purpose; no checkbox belongs in the panel.");
+            string text = control.Text ?? "";
+            if (text.StartsWith("v", StringComparison.Ordinal) && text.Length > 1 &&
+                Char.IsDigit(text[1]))
+            {
+                foundVersion = true;
+            }
         }
+        if (!foundVersion)
+            throw new InvalidOperationException("The version field must show a version such as v0.1.5-rc.2.");
     }
 
     /// <summary>
@@ -55,9 +64,16 @@ public static class ControlPanelLayoutTests
         if (FindTextBox(form) == null)
             throw new InvalidOperationException("The log needs a search box (and the port needs a box).");
 
-        foreach (string label in new[] { "下一个", "上一个", "导出", "清空" })
+        // Two of the toolbar buttons are icon-only, with their label in a tooltip, which is
+        // how the design presents the navigation pair; the rest carry their text.
+        foreach (string label in new[] { "导出", "清空" })
         {
             if (FindButtonByText(form, label) == null)
+                throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
+        }
+        foreach (string label in new[] { "上一个", "下一个" })
+        {
+            if (FindButtonByName(form, label) == null)
                 throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
         }
 
@@ -107,41 +123,35 @@ public static class ControlPanelLayoutTests
     /// form) reports false. Reachability is confirmed by driving the real window.
     /// </summary>
     /// <summary>
-    /// The install-directory row must carry the path and a read-only port.
+    /// The runtime-information card must carry the four facts, and the header must carry
+    /// an editable port field.
     ///
-    /// Both the browse button and the port editor were removed deliberately. The
-    /// directory can only be chosen before an install and the install flow already opens
-    /// its own picker; the port follows the Harness default, and an editable box only
-    /// invited a change that would not affect an already-running instance.
+    /// The browse button is gone for good: the directory can only be chosen before an
+    /// install, and the install flow already opens its own picker. The port is editable
+    /// again, which the approved design calls for.
     /// </summary>
     private static void VerifyInstallDirectoryRow(Control form)
     {
-        TableLayoutPanel row = FindRowContainingLabel(form, "安装目录");
-        if (row == null)
-            throw new InvalidOperationException("The install-directory row was not found.");
-        if (row.Controls.Count != 4)
-            throw new InvalidOperationException(
-                "The install-directory row must hold the label, the path, the port label, and the port value, got " +
-                row.Controls.Count + ".");
+        if (FindLabelByText(form, "安装目录") == null)
+            throw new InvalidOperationException("The runtime-information card needs an install-directory caption.");
+        foreach (string caption in new[] { "状态", "运行状态", "Harness 版本" })
+        {
+            if (FindLabelByText(form, caption) == null)
+                throw new InvalidOperationException("The runtime-information card is missing the '" + caption + "' caption.");
+        }
 
         if (FindButtonByText(form, "浏览") != null)
             throw new InvalidOperationException(
                 "The browse button was removed on purpose; the install flow owns directory selection.");
 
-        // The port must be shown but not editable.
-        foreach (Control child in row.Controls)
-        {
-            if (child is TextBox)
-            {
-                throw new InvalidOperationException(
-                    "The install-directory row must not carry an editable field; the port is display only.");
-            }
-        }
+        // Exactly one text box belongs to the header: the editable port.
+        TextBox port = FindTextBox(form);
+        if (port == null)
+            throw new InvalidOperationException("The header needs an editable port field.");
 
-        Label portValue = FindLabelByText(row, HarnessPortPolicy.DefaultPort.ToString());
-        if (portValue == null)
-            throw new InvalidOperationException(
-                "The row must show the port in use, expected '" + HarnessPortPolicy.DefaultPort + "'.");
+        int value;
+        if (!Int32.TryParse(port.Text, out value) || !HarnessPortPolicy.IsValid(value))
+            throw new InvalidOperationException("The port field must show a usable port, got '" + port.Text + "'.");
     }
 
     /// <summary>Finds a label with the given text anywhere under the parent.</summary>
@@ -175,6 +185,30 @@ public static class ControlPanelLayoutTests
         return null;
     }
 
+    /// <summary>
+    /// Finds an icon-only button by its accessible name. Two toolbar buttons show only an
+    /// icon, so this is how they are identified.
+    /// </summary>
+    private static Button FindButtonByName(Control parent, string name)
+    {
+        var all = new System.Collections.Generic.List<Control>();
+        Collect(parent, all);
+        foreach (Control control in all)
+        {
+            if (control.AccessibleName == name)
+                return control as Button;
+        }
+        return null;
+    }
+
+    private static void Collect(Control parent, System.Collections.Generic.List<Control> into)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            into.Add(child);
+            Collect(child, into);
+        }
+    }
     private static Button FindButtonByText(Control parent, string text)
     {
         foreach (Control child in parent.Controls)
