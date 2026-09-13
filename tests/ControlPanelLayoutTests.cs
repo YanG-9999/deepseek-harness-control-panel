@@ -32,7 +32,7 @@ public static class ControlPanelLayoutTests
         if (FindTextBox(form) == null)
             throw new InvalidOperationException("The log needs a search box (and the port needs a box).");
 
-        foreach (string label in new[] { "下一个", "上一个", "导出日志", "清空" })
+        foreach (string label in new[] { "下一个", "上一个", "导出", "清空" })
         {
             if (FindButtonByText(form, label) == null)
                 throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
@@ -100,8 +100,13 @@ public static class ControlPanelLayoutTests
             throw new InvalidOperationException(
                 "The install-directory row must hold its label, the path, the browse button, and the port label and box, got " +
                 row.Controls.Count + ".");
-        if (browse.Dock != DockStyle.Fill)
-            throw new InvalidOperationException("The browse button must fill its column, not auto-size past it.");
+
+        // The row centres its controls vertically, which clears the anchor; assert the
+        // button still occupies its own cell rather than stretching across the row.
+        if (row.GetColumn(browse) != 2)
+            throw new InvalidOperationException("The browse button must sit in its own column.");
+        if (browse.Anchor != AnchorStyles.None)
+            throw new InvalidOperationException("The browse button must be centred in its cell, not stretched.");
     }
 
     private static Button FindButtonByText(Control parent, string text)

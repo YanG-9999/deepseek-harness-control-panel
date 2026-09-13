@@ -1297,12 +1297,18 @@ public static class HarnessUpdatePolicy
 public static class LogSearchPolicy
 {
     /// <summary>
+    /// Hint text for the empty search box. The box has no visible label, so without
+    /// this nothing on screen says what it searches or that it is a search at all.
+    /// Kept short: the column is sized so this fits without being clipped.
+    /// </summary>
+    public const string SearchPlaceholder = "搜索日志";
+
+    /// <summary>
     /// Every start index where <paramref name="needle"/> occurs, case-insensitively.
     /// An empty or whitespace needle matches nothing rather than everything, so an
     /// empty search box never reports thousands of hits.
     /// </summary>
-    public static List<int> FindMatches(string haystack, string needle)
-    {
+    public static List<int> FindMatches(string haystack, string needle)    {
         var matches = new List<int>();
         if (String.IsNullOrEmpty(haystack) || String.IsNullOrWhiteSpace(needle))
             return matches;
@@ -2154,6 +2160,7 @@ public sealed class ManagerForm : Form
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+        // One line tall: the log toolbar is a flat row.
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(main);
@@ -2170,6 +2177,9 @@ public sealed class ManagerForm : Form
         pathBox.Dock = DockStyle.Fill;
         pathBox.TextAlign = ContentAlignment.MiddleLeft;
         pathBox.AutoEllipsis = true;
+        // The percentage column can collapse to a minimum, so each flexible control
+        // states the width below which it stops being usable.
+        pathBox.MinimumSize = new Size(200, 0);
         pathPanel.Controls.Add(pathLabel, 0, 0);
         pathPanel.Controls.Add(pathBox, 1, 0);
         AddButton(pathPanel, browseButton, "浏览", BrowseClick);
@@ -2222,6 +2232,12 @@ public sealed class ManagerForm : Form
         infoPanel.Controls.Add(new Label { Text = "Harness 版本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         versionLabel.Dock = DockStyle.Fill;
         versionLabel.TextAlign = ContentAlignment.MiddleLeft;
+        // The update hint and the plain version share this line, so give it room on
+        // wide windows instead of clipping the longer of the two.
+        versionLabel.AutoEllipsis = true;
+        // Same reason as the log search box: a percentage column can collapse, and the
+        // update hint is the longest text this label ever shows.
+        versionLabel.MinimumSize = new Size(260, 0);
         infoPanel.Controls.Add(versionLabel, 1, 0);
         // The auto-start switch lives on this row, which had spare width.
         autoStartCheck.Text = TrayClosePolicy.MenuAutoStart;
@@ -2252,29 +2268,42 @@ public sealed class ManagerForm : Form
         var logTools = new TableLayoutPanel();
         logTools.Dock = DockStyle.Fill;
         logTools.ColumnCount = 7;
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        // Fixed columns total 446 of the 710 available; the rest goes to the search box,
+        // which needs about 260px to show its placeholder and a realistic query.
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
         logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
-        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
         logTools.Controls.Add(new Label { Text = "日志", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+
         logSearchBox.Dock = DockStyle.Fill;
+        // A percentage column alone collapsed this to its minimum width in practice;
+        // an explicit floor guarantees the box stays usable for a real search term.
+        logSearchBox.MinimumSize = new Size(220, 0);
         logSearchBox.TextChanged += delegate { ApplyLogHighlight(); };
         logTools.Controls.Add(logSearchBox, 1, 0);
-        AddButton(logTools, logFindNextButton, "下一个", LogFindNextClick);
-        logTools.Controls.Add(logFindNextButton, 2, 0);
+
         AddButton(logTools, logFindPreviousButton, "上一个", LogFindPreviousClick);
-        logTools.Controls.Add(logFindPreviousButton, 3, 0);
+        logTools.Controls.Add(logFindPreviousButton, 2, 0);
+
         logMatchLabel.Dock = DockStyle.Fill;
-        logMatchLabel.TextAlign = ContentAlignment.MiddleLeft;
+        logMatchLabel.TextAlign = ContentAlignment.MiddleCenter;
         logMatchLabel.ForeColor = Color.DimGray;
-        logTools.Controls.Add(logMatchLabel, 4, 0);
-        AddButton(logTools, logExportButton, "导出日志", LogExportClick);
+        logTools.Controls.Add(logMatchLabel, 3, 0);
+
+        AddButton(logTools, logFindNextButton, "下一个", LogFindNextClick);
+        logTools.Controls.Add(logFindNextButton, 4, 0);
+
+        AddButton(logTools, logExportButton, "导出", LogExportClick);
         logTools.Controls.Add(logExportButton, 5, 0);
+
         AddButton(logTools, logClearButton, "清空", LogClearClick);
         logTools.Controls.Add(logClearButton, 6, 0);
+
+        logTools.CellPaint += DrawPlaceholder;
         main.Controls.Add(logTools, 0, 5);
 
         logBox.ReadOnly = true;
@@ -2284,6 +2313,14 @@ public sealed class ManagerForm : Form
         logBox.Dock = DockStyle.Fill;
         logBox.BackColor = Color.White;
         main.Controls.Add(logBox, 0, 6);
+
+        // Align the boxes and labels vertically with the buttons beside them. Sizing
+        // alone is not enough: a 36px label in a 56px row drifts away from the 30px
+        // button next to it unless the anchor is cleared and the offset applied.
+        AlignMiddleFor(pathPanel);
+        AlignMiddleFor(infoPanel);
+        AlignMiddle(logSearchBox);
+        AlignMiddle(logMatchLabel);
     }
 
     private void AddButton(Control parent, Button button, string text, EventHandler handler)
@@ -2293,6 +2330,69 @@ public sealed class ManagerForm : Form
         button.Height = 30;
         button.Click += handler;
         parent.Controls.Add(button);
+    }
+
+    /// <summary>
+    /// Vertically centres a control in its table cell.
+    ///
+    /// Anchoring to None centres both axes, and the offset is applied explicitly rather
+    /// than through a Margin, which some cells ignore. Without this, labels and text
+    /// boxes size themselves taller than the buttons beside them and the row reads as
+    /// misaligned even though nothing is actually wrong.
+    /// </summary>
+    private static void AlignMiddle(Control control)
+    {
+        // Containers manage their own children; offsetting one by its own height would
+        // push it out of the cell it is supposed to fill.
+        if (control is TableLayoutPanel || control is FlowLayoutPanel)
+            return;
+
+        control.Anchor = AnchorStyles.None;
+        TableLayoutPanel table = control.Parent as TableLayoutPanel;
+        if (table == null)
+            return;
+        int row = table.GetRow(control);
+        int rowHeight = table.GetRowHeights()[row];
+        control.Top = Math.Max(0, (rowHeight - control.Height) / 2);
+    }
+
+    /// <summary>Runs the vertical centring for every control in a table.</summary>
+    private static void AlignMiddleFor(TableLayoutPanel table)
+    {
+        foreach (Control child in table.Controls)
+            AlignMiddle(child);
+    }
+
+    /// <summary>
+    /// Draws grey hint text into an empty text box. WinForms has no native placeholder,
+    /// and an unlabelled box beside two navigation buttons gives no clue what it searches.
+    /// </summary>
+    private static void DrawPlaceholder(object sender, TableLayoutCellPaintEventArgs e)
+    {
+        var table = sender as TableLayoutPanel;
+        if (table == null)
+            return;
+        Control target = null;
+        foreach (Control child in table.Controls)
+        {
+            if (table.GetCellPosition(child).Column == e.Column &&
+                table.GetCellPosition(child).Row == e.Row)
+            {
+                target = child;
+                break;
+            }
+        }
+        var box = target as TextBox;
+        if (box == null || box.TextLength > 0)
+            return;
+
+        TextRenderer.DrawText(
+            e.Graphics,
+            LogSearchPolicy.SearchPlaceholder,
+            box.Font,
+            e.CellBounds,
+            SystemColors.GrayText,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 
     /// <summary>

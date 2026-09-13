@@ -12,6 +12,7 @@ public static class LogSearchPolicyTests
 {
     public static void Run()
     {
+        VerifyPlaceholder();
         VerifyMatching();
         VerifyEmptyNeedle();
         VerifyHitNavigation();
@@ -19,6 +20,23 @@ public static class LogSearchPolicyTests
         VerifyExportFileName();
         VerifyExportText();
         Console.WriteLine("Log search policy tests passed.");
+    }
+
+    /// <summary>
+    /// The search box carries no visible label, so the placeholder is the only thing
+    /// that says what it does. It has to stay short enough to render unclipped in the
+    /// column it sits in.
+    /// </summary>
+    private static void VerifyPlaceholder()
+    {
+        string placeholder = LogSearchPolicy.SearchPlaceholder;
+        if (String.IsNullOrWhiteSpace(placeholder))
+            throw new InvalidOperationException("The search box needs a placeholder: it has no visible label.");
+        if (placeholder.Length > 8)
+            throw new InvalidOperationException(
+                "The placeholder must stay short enough to render unclipped, got " + placeholder.Length + " characters.");
+        if (placeholder.IndexOf("日志", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The placeholder must say what it searches.");
     }
 
     private static void VerifyMatching()
