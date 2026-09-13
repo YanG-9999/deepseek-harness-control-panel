@@ -18,7 +18,59 @@ public static class ControlPanelLayoutTests
                 throw new InvalidOperationException("Expected 9 action buttons, got " + buttons.Controls.Count + ".");
 
             VerifyBrowseButtonExists(form);
+            VerifyLogToolbarExists(form);
         }
+    }
+
+    /// <summary>
+    /// The log area needs its own controls. Without them the only way to share a
+    /// failure was to drag-select the text box by hand, and there was no way to find a
+    /// keyword in a long install log.
+    /// </summary>
+    private static void VerifyLogToolbarExists(Control form)
+    {
+        if (FindTextBox(form) == null)
+            throw new InvalidOperationException("The log needs a search box.");
+
+        foreach (string label in new[] { "下一个", "上一个", "导出日志", "清空" })
+        {
+            if (FindButtonByText(form, label) == null)
+                throw new InvalidOperationException("The log toolbar is missing its '" + label + "' button.");
+        }
+
+        RichTextBox log = FindRichTextBox(form);
+        if (log == null)
+            throw new InvalidOperationException("The log text box was not found.");
+        if (!log.ReadOnly)
+            throw new InvalidOperationException("The log must stay read-only.");
+    }
+
+    private static TextBox FindTextBox(Control parent)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            var box = child as TextBox;
+            if (box != null)
+                return box;
+            TextBox nested = FindTextBox(child);
+            if (nested != null)
+                return nested;
+        }
+        return null;
+    }
+
+    private static RichTextBox FindRichTextBox(Control parent)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            var box = child as RichTextBox;
+            if (box != null)
+                return box;
+            RichTextBox nested = FindRichTextBox(child);
+            if (nested != null)
+                return nested;
+        }
+        return null;
     }
 
     /// <summary>

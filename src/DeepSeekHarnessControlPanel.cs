@@ -850,6 +850,102 @@ public static class HarnessUpdatePolicy
 }
 
 /// <summary>
+/// Finding and exporting log text. Kept free of WinForms so the match rules and the
+/// export layout are testable.
+/// </summary>
+public static class LogSearchPolicy
+{
+    /// <summary>
+    /// Every start index where <paramref name="needle"/> occurs, case-insensitively.
+    /// An empty or whitespace needle matches nothing rather than everything, so an
+    /// empty search box never reports thousands of hits.
+    /// </summary>
+    public static List<int> FindMatches(string haystack, string needle)
+    {
+        var matches = new List<int>();
+        if (String.IsNullOrEmpty(haystack) || String.IsNullOrWhiteSpace(needle))
+            return matches;
+
+        int start = 0;
+        while (start <= haystack.Length - needle.Length)
+        {
+            int index = haystack.IndexOf(needle, start, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+                break;
+            matches.Add(index);
+            // Advance past this hit so overlapping occurrences are not double counted.
+            start = index + needle.Length;
+        }
+        return matches;
+    }
+
+    public static int CountMatches(string haystack, string needle)
+    {
+        return FindMatches(haystack, needle).Count;
+    }
+
+    /// <summary>
+    /// One-based position of the current hit, for a "3/12" style indicator. Returns 0
+    /// when the index is outside the range.
+    /// </summary>
+    public static int CurrentHitNumber(int matchIndex, int matchCount)
+    {
+        if (matchCount <= 0 || matchIndex < 0 || matchIndex >= matchCount)
+            return 0;
+        return matchIndex + 1;
+    }
+
+    /// <summary>
+    /// The next hit, wrapping to the first so a search can be walked repeatedly.
+    /// </summary>
+    public static int NextMatchIndex(int currentIndex, int matchCount)
+    {
+        if (matchCount <= 0)
+            return -1;
+        if (currentIndex < 0 || currentIndex >= matchCount - 1)
+            return 0;
+        return currentIndex + 1;
+    }
+
+    /// <summary>The previous hit, wrapping to the last.</summary>
+    public static int PreviousMatchIndex(int currentIndex, int matchCount)
+    {
+        if (matchCount <= 0)
+            return -1;
+        if (currentIndex <= 0)
+            return matchCount - 1;
+        return currentIndex - 1;
+    }
+
+    /// <summary>
+    /// A default export file name. Timestamped so repeated exports do not silently
+    /// overwrite each other, which matters when collecting evidence across attempts.
+    /// </summary>
+    public static string BuildDefaultFileName(DateTime timestamp)
+    {
+        return "dsh-control-panel-" + timestamp.ToString("yyyyMMdd-HHmmss") + ".log";
+    }
+
+    /// <summary>
+    /// The text written by an export. Records when it was taken and from where, so a
+    /// log pasted into a report carries its own context.
+    /// </summary>
+    public static string BuildExportText(string logText, string installRoot, DateTime timestamp)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# DeepSeek Harness 控制面板日志");
+        builder.AppendLine("# 导出时间: " + timestamp.ToString("yyyy-MM-dd HH:mm:ss"));
+        builder.AppendLine("# 安装目录: " + (String.IsNullOrEmpty(installRoot) ? "(未设置)" : installRoot));
+        builder.AppendLine();
+        builder.Append(logText ?? "");
+        // A trailing newline keeps the last entry from merging with whatever follows.
+        if (!String.IsNullOrEmpty(logText) && !logText.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+            builder.AppendLine();
+        return builder.ToString();
+    }
+}
+
+/// <summary>
 /// Cancellation rules for long operations. A cancelled run must be reported as a
 /// cancellation rather than a failure, and the child process tree must actually be
 /// stopped instead of being left orphaned.
@@ -1231,6 +1327,12 @@ public sealed class ManagerForm : Form
     private readonly Button openFolderButton = new Button();
     private readonly Button uninstallButton = new Button();
     private readonly Button browseButton = new Button();
+    private readonly TextBox logSearchBox = new TextBox();
+    private readonly Button logFindNextButton = new Button();
+    private readonly Button logFindPreviousButton = new Button();
+    private readonly Button logExportButton = new Button();
+    private readonly Button logClearButton = new Button();
+    private readonly Label logMatchLabel = new Label();
     private readonly HttpClient http = new HttpClient();
     private readonly object gate = new object();
     private bool busy;
@@ -1369,13 +1471,14 @@ public sealed class ManagerForm : Form
         var main = new TableLayoutPanel();
         main.Dock = DockStyle.Fill;
         main.Padding = new Padding(14);
-        main.RowCount = 6;
+        main.RowCount = 7;
         main.ColumnCount = 1;
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(main);
 
@@ -1447,13 +1550,43 @@ public sealed class ManagerForm : Form
         AddButton(buttons, openFolderButton, "打开目录", OpenFolderClick);
         main.Controls.Add(buttons, 0, 4);
 
+        // Log toolbar: without these the only way to share a failure was to drag-select
+        // the text box by hand.
+        var logTools = new TableLayoutPanel();
+        logTools.Dock = DockStyle.Fill;
+        logTools.ColumnCount = 7;
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+        logTools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+        logTools.Controls.Add(new Label { Text = "日志", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        logSearchBox.Dock = DockStyle.Fill;
+        logSearchBox.TextChanged += delegate { ApplyLogHighlight(); };
+        logTools.Controls.Add(logSearchBox, 1, 0);
+        AddButton(logTools, logFindNextButton, "下一个", LogFindNextClick);
+        logTools.Controls.Add(logFindNextButton, 2, 0);
+        AddButton(logTools, logFindPreviousButton, "上一个", LogFindPreviousClick);
+        logTools.Controls.Add(logFindPreviousButton, 3, 0);
+        logMatchLabel.Dock = DockStyle.Fill;
+        logMatchLabel.TextAlign = ContentAlignment.MiddleLeft;
+        logMatchLabel.ForeColor = Color.DimGray;
+        logTools.Controls.Add(logMatchLabel, 4, 0);
+        AddButton(logTools, logExportButton, "导出日志", LogExportClick);
+        logTools.Controls.Add(logExportButton, 5, 0);
+        AddButton(logTools, logClearButton, "清空", LogClearClick);
+        logTools.Controls.Add(logClearButton, 6, 0);
+        main.Controls.Add(logTools, 0, 5);
+
         logBox.ReadOnly = true;
         logBox.ScrollBars = RichTextBoxScrollBars.Vertical;
         logBox.WordWrap = true;
         logBox.HideSelection = false;
         logBox.Dock = DockStyle.Fill;
         logBox.BackColor = Color.White;
-        main.Controls.Add(logBox, 0, 5);
+        main.Controls.Add(logBox, 0, 6);
     }
 
     private void AddButton(Control parent, Button button, string text, EventHandler handler)
@@ -1481,6 +1614,170 @@ public sealed class ManagerForm : Form
     private string StateFile { get { return Path.Combine(Root, ".dsh-manager-state.json"); } }
     private string SettingsDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepSeekHarnessManager"); } }
     private string SettingsFile { get { return Path.Combine(SettingsDirectory, "settings.json"); } }
+
+    /// <summary>Current highlight position within the log search hits, or -1.</summary>
+    private int logMatchIndex = -1;
+
+    private void LogFindNextClick(object sender, EventArgs e)
+    {
+        MoveLogMatch(forward: true);
+    }
+
+    private void LogFindPreviousClick(object sender, EventArgs e)
+    {
+        MoveLogMatch(forward: false);
+    }
+
+    /// <summary>Walks to the next or previous hit, wrapping around.</summary>
+    private void MoveLogMatch(bool forward)
+    {
+        List<int> matches = CurrentLogMatches();
+        if (matches.Count == 0)
+        {
+            logMatchIndex = -1;
+            UpdateLogMatchLabel(0);
+            return;
+        }
+        logMatchIndex = forward
+            ? LogSearchPolicy.NextMatchIndex(logMatchIndex, matches.Count)
+            : LogSearchPolicy.PreviousMatchIndex(logMatchIndex, matches.Count);
+        HighlightLogMatches(matches);
+    }
+
+    private List<int> CurrentLogMatches()
+    {
+        return LogSearchPolicy.FindMatches(logBox.Text, logSearchBox.Text);
+    }
+
+    /// <summary>
+    /// Repaints the highlights and, when the search text changed, starts from the
+    /// first hit rather than keeping a stale position.
+    /// </summary>
+    private void ApplyLogHighlight()
+    {
+        logMatchIndex = -1;
+        HighlightLogMatches(CurrentLogMatches());
+    }
+
+    /// <summary>
+    /// Paints every hit and scrolls the current one into view. The selection colours
+    /// are restored afterwards so the appended log keeps its per-kind colours.
+    /// </summary>
+    private void HighlightLogMatches(List<int> matches)
+    {
+        if (logBox.TextLength == 0)
+        {
+            UpdateLogMatchLabel(0);
+            return;
+        }
+
+        // Clearing the previous highlight means repainting the whole box background.
+        int savedStart = logBox.SelectionStart;
+        int savedLength = logBox.SelectionLength;
+        logBox.SuspendLayout();
+        try
+        {
+            logBox.SelectAll();
+            logBox.SelectionBackColor = logBox.BackColor;
+            logBox.SelectionColor = logBox.ForeColor;
+            logBox.DeselectAll();
+
+            string needle = logSearchBox.Text;
+            if (matches.Count > 0 && !String.IsNullOrWhiteSpace(needle))
+            {
+                for (int i = 0; i < matches.Count; i++)
+                {
+                    logBox.Select(matches[i], needle.Length);
+                    // The active hit is emphasised so "3/12" is meaningful at a glance.
+                    logBox.SelectionBackColor = i == logMatchIndex ? Color.Gold : Color.LightYellow;
+                }
+
+                int active = logMatchIndex >= 0 && logMatchIndex < matches.Count ? logMatchIndex : 0;
+                logBox.Select(matches[active], needle.Length);
+                logBox.ScrollToCaret();
+            }
+            else if (logMatchIndex < 0)
+            {
+                logBox.Select(Math.Min(savedStart, logBox.TextLength), 0);
+            }
+        }
+        finally
+        {
+            logBox.ResumeLayout();
+        }
+        UpdateLogMatchLabel(matches.Count);
+    }
+
+    private void UpdateLogMatchLabel(int matchCount)
+    {
+        if (String.IsNullOrWhiteSpace(logSearchBox.Text))
+        {
+            logMatchLabel.Text = "";
+            return;
+        }
+        if (matchCount == 0)
+        {
+            logMatchLabel.Text = "无匹配";
+            return;
+        }
+        int current = LogSearchPolicy.CurrentHitNumber(logMatchIndex, matchCount);
+        logMatchLabel.Text = (current == 0 ? 1 : current) + "/" + matchCount + " 项";
+    }
+
+    /// <summary>
+    /// Writes the log to a file the user chooses. The export carries the timestamp and
+    /// install root so the file explains itself when it is shared.
+    /// </summary>
+    private void LogExportClick(object sender, EventArgs e)
+    {
+        DateTime now = DateTime.Now;
+        using (var dialog = new SaveFileDialog())
+        {
+            dialog.Title = "导出控制面板日志";
+            dialog.Filter = "日志文件 (*.log)|*.log|文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*";
+            dialog.FileName = LogSearchPolicy.BuildDefaultFileName(now);
+            dialog.InitialDirectory = Directory.Exists(Root)
+                ? Root
+                : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            try
+            {
+                string text = LogSearchPolicy.BuildExportText(logBox.Text, Root, now);
+                File.WriteAllText(dialog.FileName, text, new UTF8Encoding(false));
+                Log("日志已导出: " + dialog.FileName);
+            }
+            catch (Exception ex)
+            {
+                Log("导出日志失败: " + ex.Message);
+                MessageBox.Show(this, "导出日志失败：" + Environment.NewLine + ex.Message,
+                    "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Clears the log after confirming, because the previous lines are the only record
+    /// of what happened. Exporting first is offered rather than silently discarding.
+    /// </summary>
+    private void LogClearClick(object sender, EventArgs e)
+    {
+        if (logBox.TextLength == 0)
+            return;
+        DialogResult answer = MessageBox.Show(
+            this,
+            "清空后当前日志将不再显示。如果需要保留，请先导出。" + Environment.NewLine + Environment.NewLine +
+            "确定清空吗？",
+            "DeepSeek Harness",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (answer != DialogResult.Yes)
+            return;
+        logBox.Clear();
+        logMatchIndex = -1;
+        UpdateLogMatchLabel(0);
+    }
 
     private void BrowseClick(object sender, EventArgs e)
     {
