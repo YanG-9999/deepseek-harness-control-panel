@@ -1300,8 +1300,28 @@ public static class HarnessUpdatePolicy
 
     /// <summary>
     /// The line the panel shows in the status area after an automatic check.
+    ///
+    /// Only an available update is worth a status line. Being up to date is the normal
+    /// state and the installed version is already on the version row, so repeating
+    /// "already up to date" is noise that pushes the actual status text aside.
     /// </summary>
     public static string DescribeAvailability(string localCommit, string remoteCommit)
+    {
+        if (!IsCommitId(remoteCommit))
+            return "";
+        if (!IsCommitId(localCommit))
+            return "";
+        if (HasUpdate(localCommit, remoteCommit))
+            return "发现新版本（本机 " + ShortCommit(localCommit) + " → 上游 " + ShortCommit(remoteCommit) + "）";
+        return "";
+    }
+
+    /// <summary>
+    /// The line written to the log after an automatic check. Unlike the status area this
+    /// always says what was found, including "up to date", because the log is the record
+    /// of what the panel actually checked.
+    /// </summary>
+    public static string DescribeAvailabilityForLog(string localCommit, string remoteCommit)
     {
         if (!IsCommitId(remoteCommit))
             return "";
@@ -2141,12 +2161,15 @@ public sealed class ManagerForm : Form
             string branch = await GetDefaultBranchAsync();
             string remote = await GetRemoteCommitAsync(branch);
             string local = LocalCommit();
-            string message = HarnessUpdatePolicy.DescribeAvailability(local, remote);
-            if (String.IsNullOrEmpty(message))
-                return;
-            Log("自动检查更新：" + message +
-                (HarnessUpdatePolicy.HasUpdate(local, remote) ? "。点击“检查 Harness 更新”即可升级。" : "。"));
-            ShowUpdateStatus(message);
+
+            // The log records every check, including "up to date"; the status area only
+            // speaks up when there is an update worth acting on.
+            string forLog = HarnessUpdatePolicy.DescribeAvailabilityForLog(local, remote);
+            if (!String.IsNullOrEmpty(forLog))
+                Log("自动检查更新：" + forLog +
+                    (HarnessUpdatePolicy.HasUpdate(local, remote) ? "。点击“检查 Harness 更新”即可升级。" : "。"));
+
+            ShowUpdateStatus(HarnessUpdatePolicy.DescribeAvailability(local, remote));
         }
         catch (Exception)
         {

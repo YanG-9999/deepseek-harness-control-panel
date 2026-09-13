@@ -16,6 +16,7 @@ public static class HarnessUpdatePolicyTests
         VerifyHasUpdate();
         VerifyShortCommit();
         VerifyDescription();
+        VerifyLogDescription();
         Console.WriteLine("Harness update policy tests passed.");
     }
 
@@ -73,11 +74,12 @@ public static class HarnessUpdatePolicyTests
 
     private static void VerifyDescription()
     {
-        string same = HarnessUpdatePolicy.DescribeAvailability(Local, Local);
-        if (same.IndexOf("已是最新版本", StringComparison.Ordinal) < 0)
-            throw new InvalidOperationException("Identical commits must be described as up to date.");
-        if (same.IndexOf("aa8262e", StringComparison.Ordinal) < 0)
-            throw new InvalidOperationException("The up-to-date line must show which version is installed.");
+        // The status area stays quiet unless there is something to act on. Being up to
+        // date is the normal state and the version is already on the version row.
+        if (HarnessUpdatePolicy.DescribeAvailability(Local, Local) != "")
+            throw new InvalidOperationException("An up-to-date check must not add a status line.");
+        if (HarnessUpdatePolicy.DescribeAvailability("", Remote) != "")
+            throw new InvalidOperationException("An unknown local commit must not add a status line.");
 
         string newer = HarnessUpdatePolicy.DescribeAvailability(Local, Remote);
         if (newer.IndexOf("发现新版本", StringComparison.Ordinal) < 0)
@@ -86,16 +88,39 @@ public static class HarnessUpdatePolicyTests
             newer.IndexOf("c291e79", StringComparison.Ordinal) < 0)
             throw new InvalidOperationException("The update line must show both sides of the change.");
 
-        string unknownLocal = HarnessUpdatePolicy.DescribeAvailability("", Remote);
-        if (unknownLocal.IndexOf("发现新版本", StringComparison.Ordinal) >= 0)
-            throw new InvalidOperationException("An unknown local version must not be described as an available update.");
-        if (unknownLocal.IndexOf("无法比较", StringComparison.Ordinal) < 0)
-            throw new InvalidOperationException("An unknown local version must say why no comparison happened.");
-
         // Nothing usable to say when the remote commit could not be read.
         if (HarnessUpdatePolicy.DescribeAvailability(Local, "") != "")
             throw new InvalidOperationException("An unreadable remote commit must produce no status line.");
         if (HarnessUpdatePolicy.DescribeAvailability(Local, null) != "")
             throw new InvalidOperationException("A null remote commit must produce no status line.");
+    }
+
+    /// <summary>
+    /// The log is the record of what was actually checked, so unlike the status area it
+    /// always reports the outcome, including "already up to date".
+    /// </summary>
+    private static void VerifyLogDescription()
+    {
+        string upToDate = HarnessUpdatePolicy.DescribeAvailabilityForLog(Local, Local);
+        if (upToDate.IndexOf("已是最新版本", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The log must record an up-to-date check.");
+        if (upToDate.IndexOf("aa8262e", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The log line must show which version is installed.");
+
+        string newer = HarnessUpdatePolicy.DescribeAvailabilityForLog(Local, Remote);
+        if (newer.IndexOf("发现新版本", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The log must record an available update.");
+        if (newer.IndexOf("c291e79", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("The log line must show the upstream commit.");
+
+        string unknownLocal = HarnessUpdatePolicy.DescribeAvailabilityForLog("", Remote);
+        if (unknownLocal.IndexOf("发现新版本", StringComparison.Ordinal) >= 0)
+            throw new InvalidOperationException("An unknown local version must not be logged as an available update.");
+        if (unknownLocal.IndexOf("无法比较", StringComparison.Ordinal) < 0)
+            throw new InvalidOperationException("An unknown local version must record why no comparison happened.");
+
+        // Nothing to log when the remote commit could not be read.
+        if (HarnessUpdatePolicy.DescribeAvailabilityForLog(Local, "") != "")
+            throw new InvalidOperationException("An unreadable remote commit must produce no log line.");
     }
 }
