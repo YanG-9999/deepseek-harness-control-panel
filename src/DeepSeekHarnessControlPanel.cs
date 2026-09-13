@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.5.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.5")]
+[assembly: System.Reflection.AssemblyVersion("0.1.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.6.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.6")]
 
 public enum StopTargetKind
 {
@@ -1167,9 +1167,21 @@ public static class UiBackground
 }
 
 /// <summary>
-/// A white rounded card with a hairline border, matching the grouped panels in the
-/// design. WinForms panels are square, so the shape is painted rather than configured.
+/// Buffers transparent layout containers, including their background painting.
 /// </summary>
+public sealed class UiLayoutPanel : TableLayoutPanel
+{
+    public UiLayoutPanel()
+    {
+        // Transparent containers must not erase their parent directly on the screen
+        // while their children are still awaiting WM_PAINT during restore.
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.OptimizedDoubleBuffer, true);
+    }
+}
+
+/// <summary>A white rounded card with a hairline border.</summary>
 public sealed class UiCardPanel : Panel
 {
     public int CornerRadius { get; set; }
@@ -2296,7 +2308,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.5";
+    public const string Version = "0.1.6";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.
@@ -3009,6 +3021,30 @@ public sealed class ManagerForm : Form
     /// </summary>
     private bool nodeTransportRequired;
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams parameters = base.CreateParams;
+            // WS_EX_COMPOSITED coordinates painting across child HWNDs. Form-level
+            // DoubleBuffered alone does not buffer the nested control hierarchy.
+            parameters.ExStyle |= 0x02000000;
+            return parameters;
+        }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        // Minimizing gives the form a 0x0 client area. Do not collapse its child
+        // layout into narrow strips that can be exposed during restoration.
+        if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            return;
+        base.OnResize(e);
+        // Finish the buffered hierarchy before the restored window is presented.
+        if (IsHandleCreated)
+            Refresh();
+    }
+
     public ManagerForm()
     {
         Text = "DeepSeek Harness 控制面板";
@@ -3020,6 +3056,10 @@ public sealed class ManagerForm : Form
         MinimumSize = new Size(1100, 760);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9F);
+        // Buffer this surface as well as the layout containers and child controls.
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.OptimizedDoubleBuffer, true);
 
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
@@ -3042,13 +3082,13 @@ public sealed class ManagerForm : Form
         stateTimer.Interval = HarnessLifecyclePolicy.StatePollIntervalMilliseconds;
         stateTimer.Tick += delegate { if (!busy) QueueStateRefresh(false); };
         stateTimer.Start();
-        FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
+        FormClosed += delegate
+        {
+            stateTimer.Stop();
+            stateTimer.Dispose();
+        };
 
         FormClosing += OnFormClosing;
-
-        // Start invisible; RevealWhenIdle puts it on screen once every control has painted.
-        Opacity = 0;
-        Application.Idle += RevealWhenIdle;
 
     }
 
@@ -3084,6 +3124,10 @@ public sealed class ManagerForm : Form
     private void OnShown(object sender, EventArgs e)
     {
         Shown -= OnShown;
+        // Complete layout and paint once the normal window is shown.
+        PerformLayout();
+        Invalidate(true);
+        Update();
         if (!IsInstalled())
             return;
         Task.Run(delegate { return AutoCheckForUpdatesAsync(); });
@@ -3132,7 +3176,7 @@ public sealed class ManagerForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
 
-        rootLayout = new TableLayoutPanel();
+        rootLayout = new UiLayoutPanel();
         rootLayout.Dock = DockStyle.Fill;
         // Room for the cards' shadows: a shadow drawn inside the cell would be clipped, so
         // the layout leaves the spread as margin and each card sits inside its cell.
@@ -3161,43 +3205,7 @@ public sealed class ManagerForm : Form
     {
         // ClientRectangle is empty while the window is minimized, and the erase message
         // still arrives: the guard lives in UiBackground.Paint.
-        paintedOnce = true;
         UiBackground.Paint(e.Graphics, ClientRectangle);
-    }
-
-    private bool revealed;
-    private bool paintedOnce;
-
-    /// <summary>
-    /// Puts the window on screen once it has something to show.
-    ///
-    /// Windows makes a window visible the moment it is shown and lets it paint afterwards,
-    /// which is why the panel used to open as a half-built frame: the desktop, then a
-    /// window with only its background, then the controls arriving area by area.
-    ///
-    /// The trigger is the first idle moment after the first paint: an empty message queue
-    /// means every control has finished drawing. Neither of the obvious alternatives works.
-    /// The form's Shown event arrives before the log area has painted, and a Windows timer
-    /// is starved for as long as paint messages keep coming, which on the machine this was
-    /// written for meant it never fired at all.
-    /// </summary>
-    private void RevealWhenIdle(object sender, EventArgs e)
-    {
-        if (!paintedOnce || !Visible)
-            return;
-        Reveal();
-    }
-
-    /// <summary>
-    /// Ends the invisible start, from whichever caller gets there first.
-    /// </summary>
-    private void Reveal()
-    {
-        if (revealed)
-            return;
-        revealed = true;
-        Application.Idle -= RevealWhenIdle;
-        Opacity = 1;
     }
 
 
@@ -3206,7 +3214,7 @@ public sealed class ManagerForm : Form
     /// </summary>
     private Control BuildHeader()
     {
-        var header = new TableLayoutPanel();
+        var header = new UiLayoutPanel();
         header.Dock = DockStyle.Fill;
         header.Margin = new Padding(0);
         header.ColumnCount = 2;
@@ -3216,7 +3224,7 @@ public sealed class ManagerForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
 
-        var brand = new TableLayoutPanel();
+        var brand = new UiLayoutPanel();
         brand.Dock = DockStyle.Fill;
         brand.Margin = new Padding(0);
         brand.ColumnCount = 2;
@@ -3259,7 +3267,7 @@ public sealed class ManagerForm : Form
         portPanel.ShowShadow = false;
         portPanel.CornerRadius = 18;
 
-        var portLayout = new TableLayoutPanel();
+        var portLayout = new UiLayoutPanel();
         portLayout.Dock = DockStyle.Fill;
         portLayout.Margin = new Padding(0);
         portLayout.Padding = new Padding(8, 0, 8, 0);
@@ -3333,7 +3341,7 @@ public sealed class ManagerForm : Form
 
     private static Control BuildInfoMetric(string caption, Control value, UiIcon icon)
     {
-        var metric = new TableLayoutPanel();
+        var metric = new UiLayoutPanel();
         metric.Dock = DockStyle.Fill;
         metric.Margin = new Padding(0);
         metric.ColumnCount = 2;
@@ -3349,7 +3357,7 @@ public sealed class ManagerForm : Form
         iconTile.Margin = new Padding(12, 20, 12, 20);
         metric.Controls.Add(iconTile, 0, 0);
 
-        var text = new TableLayoutPanel();
+        var text = new UiLayoutPanel();
         text.Dock = DockStyle.Fill;
         text.Margin = new Padding(0, 18, 8, 18);
         text.ColumnCount = 1;
@@ -3379,7 +3387,7 @@ public sealed class ManagerForm : Form
     /// </summary>
     private static Control BuildCardTitle(string text)
     {
-        var row = new TableLayoutPanel();
+        var row = new UiLayoutPanel();
         row.Dock = DockStyle.Top;
         row.Margin = new Padding(0);
         row.Height = 26;
@@ -3456,7 +3464,7 @@ public sealed class ManagerForm : Form
     private Control BuildInfoCard()
     {
         var card = NewCard();
-        var cells = new TableLayoutPanel();
+        var cells = new UiLayoutPanel();
         cells.Dock = DockStyle.Fill;
         cells.Margin = new Padding(0);
         cells.Padding = new Padding(8, 0, 8, 0);
@@ -3514,7 +3522,7 @@ public sealed class ManagerForm : Form
     /// </summary>
     private Control BuildActionCard()
     {
-        var buttons = new TableLayoutPanel();
+        var buttons = new UiLayoutPanel();
         buttons.Dock = DockStyle.Fill;
         buttons.Margin = new Padding(UiStyle.ShadowSpread, 0, UiStyle.ShadowSpread, UiStyle.CardGap);
         buttons.ColumnCount = 9;
@@ -3580,7 +3588,7 @@ public sealed class ManagerForm : Form
     {
         var card = NewCard();
 
-        var inside = new TableLayoutPanel();
+        var inside = new UiLayoutPanel();
         inside.Dock = DockStyle.Fill;
         inside.Padding = new Padding(12, 10, 12, 12);
         inside.ColumnCount = 1;
@@ -3589,7 +3597,7 @@ public sealed class ManagerForm : Form
         inside.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         inside.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        var heading = new TableLayoutPanel();
+        var heading = new UiLayoutPanel();
         heading.Dock = DockStyle.Fill;
         heading.Margin = new Padding(0);
         heading.ColumnCount = 2;
@@ -3599,7 +3607,7 @@ public sealed class ManagerForm : Form
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        var title = new TableLayoutPanel();
+        var title = new UiLayoutPanel();
         title.Dock = DockStyle.Fill;
         title.Margin = new Padding(0);
         title.ColumnCount = 2;
@@ -3651,7 +3659,7 @@ public sealed class ManagerForm : Form
 
     private Control BuildLogToolbar()
     {
-        var toolbar = new TableLayoutPanel();
+        var toolbar = new UiLayoutPanel();
         toolbar.Dock = DockStyle.Fill;
         toolbar.Margin = new Padding(0);
         toolbar.ColumnCount = 3;
@@ -4005,7 +4013,7 @@ public sealed class ManagerForm : Form
         Log(title + "...");
         Task.Run(action).ContinueWith(t =>
         {
-            BeginInvoke((Action)delegate
+            PostToUi(delegate
             {
                 bool wasCancelled = OperationCancellationPolicy.IsCancellation(
                     cancellation != null && cancellation.IsCancellationRequested,
@@ -4144,11 +4152,16 @@ public sealed class ManagerForm : Form
 
     private void Log(string message)
     {
+        // Work that finishes after the window is gone - a background reading, a cancelled
+        // operation - still logs. Writing to a disposed form throws, and a line nobody can
+        // read is not worth a crash dialog.
         if (InvokeRequired)
         {
-            BeginInvoke((Action)delegate { Log(message); });
+            PostToUi(delegate { Log(message); });
             return;
         }
+        if (IsDisposed || Disposing)
+            return;
         string clean = StripAnsiSequences(message);
         string[] lines = clean.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
         foreach (string line in lines)
@@ -4167,6 +4180,33 @@ public sealed class ManagerForm : Form
         }
         logBox.SelectionColor = logBox.ForeColor;
         logBox.ScrollToCaret();
+    }
+
+    /// <summary>
+    /// Marshals work onto the UI thread, or drops it if the window is already gone.
+    ///
+    /// Checking IsDisposed first is not enough on its own: the window can be closed between
+    /// the check and the call, and marshalling onto a disposed form throws
+    /// ObjectDisposedException("ManagerForm"). That is an odd way to tell someone they
+    /// closed the window, and it arrives as an unhandled exception on a background thread,
+    /// which is why it surfaced as a .NET crash dialog rather than the panel's own report.
+    /// </summary>
+    private void PostToUi(Action work)
+    {
+        if (IsDisposed || Disposing)
+            return;
+        try
+        {
+            BeginInvoke(work);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Closed between the check and the call.
+        }
+        catch (InvalidOperationException)
+        {
+            // No handle yet, or the message loop has already stopped; nothing can arrive.
+        }
     }
 
     private static string LogLevelText(LogMessageKind kind)
