@@ -80,10 +80,47 @@ public static class HarnessInstallationValidatorTests
         if (DirectoryCleanupPolicy.ToExtendedPath("\\\\server\\share\\Harness") != "\\\\?\\UNC\\server\\share\\Harness")
             throw new InvalidOperationException("UNC cleanup paths must use the Windows extended-length prefix.");
 
+        // Passing the commit must never throw. The inherited environment can hold
+        // case-insensitive duplicate keys (HTTP_PROXY plus http_proxy), and touching
+        // ProcessStartInfo.EnvironmentVariables then throws ArgumentException; the
+        // commit hash is diagnostic, so degrading to "not set" is the correct
+        // outcome rather than a failed build.
         var process = new System.Diagnostics.ProcessStartInfo();
-        BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");
-        string commit = process.EnvironmentVariables["DSH_CLIENT_COMMIT_HASH"];
-        if (commit != "141eb6fef83422698aef7a981029e843e8161534")
-            throw new InvalidOperationException("The official source commit was not passed to the build environment.");
+        bool applied;
+        try
+        {
+            applied = BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");
+        }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException(
+                "Applying the build commit must never throw, but it threw " +
+                error.GetType().Name + ": " + error.Message);
+        }
+
+        // The outcome is environment-dependent, so assert against what this machine's
+        // environment actually allows rather than assuming the simple case.
+        bool duplicateKeys = BuildCommitEnvironment.HasCaseInsensitiveDuplicateKeys();
+        if (duplicateKeys)
+        {
+            if (applied)
+                throw new InvalidOperationException(
+                    "The commit must be dropped, not recorded, when the inherited environment has case-duplicate keys.");
+            Console.WriteLine("  (build commit dropped as designed: environment has case-duplicate keys)");
+        }
+        else
+        {
+            if (!applied)
+                throw new InvalidOperationException("The commit was not recorded in an environment that can hold it.");
+            string commit = process.EnvironmentVariables[BuildCommitEnvironment.VariableName];
+            if (commit != "141eb6fef83422698aef7a981029e843e8161534")
+                throw new InvalidOperationException("The official source commit was not passed to the build environment.");
+        }
+
+        // A null process or blank commit must be tolerated by the same entry point.
+        if (BuildCommitEnvironment.Apply(null, "141eb6fef83422698aef7a981029e843e8161534"))
+            throw new InvalidOperationException("Applying to a null process must report that nothing was recorded.");
+        if (BuildCommitEnvironment.Apply(new System.Diagnostics.ProcessStartInfo(), "  "))
+            throw new InvalidOperationException("Applying a blank commit must report that nothing was recorded.");
     }
 }
