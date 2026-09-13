@@ -3063,7 +3063,11 @@ public sealed class ManagerForm : Form
 
         BuildUi();
         pathBox.Text = LoadConfiguredRoot();
-        RefreshState();
+
+        // Nothing is known until the first reading comes back, so every action starts
+        // disabled rather than enabled on a guess.
+        SetButtons(false, new HarnessStatusSnapshot(false, false, false, false, false, ""));
+        QueueStateRefresh(true);
 
         // Whether closing the window minimises to the tray or exits is remembered from the
         // first time the user was asked; see OnFormClosing.
@@ -3076,7 +3080,7 @@ public sealed class ManagerForm : Form
         // Poll the running state. Without this the panel showed "正在运行" forever
         // after Harness exited, until the user happened to press something.
         stateTimer.Interval = HarnessLifecyclePolicy.StatePollIntervalMilliseconds;
-        stateTimer.Tick += delegate { PollState(); };
+        stateTimer.Tick += delegate { if (!busy) QueueStateRefresh(false); };
         stateTimer.Start();
         FormClosed += delegate { stateTimer.Stop(); stateTimer.Dispose(); };
 
@@ -4261,7 +4265,7 @@ public sealed class ManagerForm : Form
         runningOperationTitle = title;
         runningToolProcess = null;
 
-        SetButtons(false, lastSnapshot ?? ComputeStatusSnapshot());
+        SetButtons(false, lastSnapshot ?? ComputeStatusSnapshot(discoveredRoots));
         Log(title + "...");
         Task.Run(action).ContinueWith(t =>
         {
@@ -4468,11 +4472,74 @@ public sealed class ManagerForm : Form
 
     /// <summary>
     /// Recomputes everything the panel displays, once, and updates the labels and
-    /// buttons from that single snapshot.
+    /// buttons from that single snapshot. Used by the rescan, which reports what it found
+    /// as soon as it returns; everything else goes through QueueStateRefresh so the window
+    /// keeps painting while the state is read.
     /// </summary>
     private void RefreshState()
     {
-        discoveredRoots = DiscoverInstallRoots();
+        ApplyStateProbe(ProbeState(), true);
+    }
+
+    /// <summary>One reading of the panel's state, taken away from the UI thread.</summary>
+    private sealed class StateProbe
+    {
+        public List<string> Roots;
+        public HarnessStatusSnapshot Snapshot;
+    }
+
+    /// <summary>
+    /// Reads the state. Nothing here touches a control except reading Root, which is a
+    /// cached string on a Label, and that makes it safe to run on a background thread.
+    /// </summary>
+    private StateProbe ProbeState()
+    {
+        var probe = new StateProbe();
+        probe.Roots = DiscoverInstallRoots();
+        probe.Snapshot = ComputeStatusSnapshot(probe.Roots);
+        return probe;
+    }
+
+    private bool stateProbeRunning;
+
+    /// <summary>
+    /// Reads the state without freezing the window.
+    ///
+    /// One reading opens a socket, runs netstat, and asks WMI which process owns the port:
+    /// about 200 ms together, long enough that doing it inline held up the first paint at
+    /// startup and stuttered the panel every three seconds after that. The reading happens
+    /// on a background thread and is applied back on the UI thread.
+    ///
+    /// <paramref name="force"/> is about the labels: a refresh after an action must write
+    /// them, while the periodic poll must not, or it would overwrite the update-available
+    /// hint with the plain version every few seconds.
+    /// </summary>
+    private void QueueStateRefresh(bool force)
+    {
+        if (stateProbeRunning)
+            return;
+        stateProbeRunning = true;
+        Task.Run(delegate { return ProbeState(); }).ContinueWith(task =>
+        {
+            stateProbeRunning = false;
+            if (IsDisposed || Disposing)
+                return;
+            if (task.IsFaulted)
+            {
+                // A failed reading is not worth a dialog: nothing is claimed about a state
+                // that could not be read, and the next poll tries again.
+                Exception error = task.Exception == null ? null : task.Exception.GetBaseException();
+                Log("读取 Harness 状态失败: " + (error == null ? "未知原因" : error.Message));
+                return;
+            }
+            ApplyStateProbe(task.Result, force);
+        }, TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    /// <summary>Applies a finished reading to the window. Runs on the UI thread.</summary>
+    private void ApplyStateProbe(StateProbe probe, bool force)
+    {
+        discoveredRoots = probe.Roots;
         bool multiple = discoveredRoots.Count > 1;
         if (discoveredRoots.Count == 0)
             pathBox.Text = "";
@@ -4481,19 +4548,25 @@ public sealed class ManagerForm : Form
         if (multiple && !discoveredRoots.Contains(Root, StringComparer.OrdinalIgnoreCase))
             pathBox.Text = discoveredRoots[0];
 
-        HarnessStatusSnapshot snapshot = ComputeStatusSnapshot();
-        if (snapshot.Installed && !IsConfiguredRoot())
-            SaveConfiguredRoot(Root);
-        ApplySnapshot(snapshot);
-        lastSnapshot = snapshot;
+        HarnessStatusSnapshot snapshot = probe.Snapshot;
+        string change = force ? "" : HarnessStatusChangePolicy.DescribeChange(Port, lastSnapshot, snapshot);
+        if (force || lastSnapshot == null || lastSnapshot.DiffersFrom(snapshot))
+        {
+            if (snapshot.Installed && !IsConfiguredRoot())
+                SaveConfiguredRoot(Root);
+            ApplySnapshot(snapshot);
+            lastSnapshot = snapshot;
+        }
         SetButtons(!busy, snapshot);
+        if (!String.IsNullOrEmpty(change))
+            Log(change);
     }
 
     /// <summary>
     /// Reads the current state once. Every fact the labels and buttons need comes
     /// from here, so a refresh probes the port and the process a single time.
     /// </summary>
-    private HarnessStatusSnapshot ComputeStatusSnapshot()
+    private HarnessStatusSnapshot ComputeStatusSnapshot(List<string> roots)
     {
         bool installed = IsInstalled();
         bool ready = installed && IsInstallationReady();
@@ -4505,7 +4578,7 @@ public sealed class ManagerForm : Form
             ready,
             portBusy,
             running,
-            discoveredRoots.Count > 1,
+            roots != null && roots.Count > 1,
             LocalVersion());
     }
 
@@ -4559,30 +4632,6 @@ public sealed class ManagerForm : Form
         }
         // "未安装" and "未运行" are neutral, not failures.
         chip.SetTone(UiStyle.NeutralFill, UiStyle.Neutral, UiStyle.TextSecondary);
-    }
-
-    /// <summary>
-    /// Polls the state so a crashed or stopped Harness is noticed without the user
-    /// pressing anything. In-flight operations own the labels and buttons, so the
-    /// poll stands down while busy and resumes from a fresh baseline afterwards.
-    /// </summary>
-    private void PollState()
-    {
-        if (busy)
-            return;
-        HarnessStatusSnapshot current = ComputeStatusSnapshot();
-        string change = HarnessStatusChangePolicy.DescribeChange(Port, lastSnapshot, current);
-        // Only touch the labels when something actually changed: re-applying an
-        // unchanged snapshot every few seconds would overwrite the update-available
-        // hint with the plain version.
-        if (lastSnapshot == null || lastSnapshot.DiffersFrom(current))
-        {
-            ApplySnapshot(current);
-            lastSnapshot = current;
-        }
-        SetButtons(true, current);
-        if (!String.IsNullOrEmpty(change))
-            Log(change);
     }
 
     private async Task InstallAsync()
