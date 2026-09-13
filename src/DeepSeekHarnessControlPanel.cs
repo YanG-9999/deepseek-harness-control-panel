@@ -18,6 +18,15 @@ using System.Web.Script.Serialization;
 using System.Management;
 using Microsoft.Win32;
 
+// Version metadata. Without these the executable reports 0.0.0.0, which leaves the
+// installer and the "Apps and features" entry showing nothing useful.
+[assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
+[assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
+[assembly: System.Reflection.AssemblyCompany("")]
+[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.0")]
+
 public enum StopTargetKind
 {
     None,
@@ -963,6 +972,69 @@ public static class SingleInstancePolicy
         return "DeepSeek Harness 控制面板已经在运行。\r\n\r\n" +
             "同一个面板不能重复启动：两个实例会同时管理 " + port + " 端口和安装状态，导致状态彼此覆盖。\r\n" +
             "已为你切换到正在运行的窗口。";
+    }
+}
+
+/// <summary>
+/// The panel's own version, and the conversions an installer needs.
+///
+/// Kept in one place because the executable's version resource, the installer's
+/// version, and the "Apps and features" entry must agree; a mismatch there is how a
+/// package ends up unable to upgrade itself.
+/// </summary>
+public static class PanelVersionPolicy
+{
+    /// <summary>
+    /// The panel's version. Bump this when releasing; everything else derives from it.
+    /// </summary>
+    public const string Version = "0.1.0";
+
+    /// <summary>
+    /// A four-part numeric version for the Win32 version resource and the installer.
+    /// A suffix such as -rc.1 is dropped: those fields are numeric only, and a
+    /// non-numeric value makes the resource invalid rather than merely ugly.
+    /// </summary>
+    public static string ToNumericVersion(string version)
+    {
+        if (String.IsNullOrWhiteSpace(version))
+            throw new InvalidOperationException("版本号为空。");
+
+        // Drop any pre-release or build metadata.
+        string core = version.Trim();
+        int suffix = core.IndexOfAny(new[] { '-', '+' });
+        if (suffix >= 0)
+            core = core.Substring(0, suffix);
+
+        string[] parts = core.Split('.');
+        var numeric = new List<int>();
+        foreach (string part in parts)
+        {
+            int value;
+            if (!Int32.TryParse(part, out value) || value < 0)
+                throw new InvalidOperationException("版本号包含非数字部分：" + version);
+            numeric.Add(value);
+        }
+        if (numeric.Count == 0)
+            throw new InvalidOperationException("版本号为空。");
+
+        // The resource wants exactly four fields.
+        while (numeric.Count < 4)
+            numeric.Add(0);
+        if (numeric.Count > 4)
+            numeric.RemoveRange(4, numeric.Count - 4);
+
+        return String.Join(".", numeric.ConvertAll(value => value.ToString()).ToArray());
+    }
+
+    /// <summary>
+    /// The file name an installer package should use. Timestamp-free so a release
+    /// replaces its predecessor rather than piling up.
+    /// </summary>
+    public static string BuildInstallerFileName(string version)
+    {
+        if (String.IsNullOrWhiteSpace(version))
+            throw new InvalidOperationException("版本号为空。");
+        return "DeepSeekHarnessControlPanel-" + version.Trim() + "-setup.exe";
     }
 }
 

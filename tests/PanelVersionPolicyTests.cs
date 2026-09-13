@@ -1,0 +1,102 @@
+using System;
+
+/// <summary>
+/// Covers the version conversions the installer depends on.
+///
+/// The executable's version resource, the installer's version, and the Apps-and-features
+/// entry must agree; a mismatch is how a package ends up unable to upgrade itself. The
+/// four-field conversion matters because the Win32 version resource is numeric only, so a
+/// pre-release suffix has to be dropped rather than passed through.
+/// </summary>
+public static class PanelVersionPolicyTests
+{
+    public static void Run()
+    {
+        VerifyDeclaredVersion();
+        VerifyNumericConversion();
+        VerifyNumericRejections();
+        VerifyPackageName();
+        Console.WriteLine("Panel version policy tests passed.");
+    }
+
+    private static void VerifyDeclaredVersion()
+    {
+        string version = PanelVersionPolicy.Version;
+        if (String.IsNullOrWhiteSpace(version))
+            throw new InvalidOperationException("The panel must declare a version.");
+        // It has to be convertible, or the installer build would fail later.
+        PanelVersionPolicy.ToNumericVersion(version);
+    }
+
+    private static void VerifyNumericConversion()
+    {
+        if (PanelVersionPolicy.ToNumericVersion("0.1.0") != "0.1.0.0")
+            throw new InvalidOperationException("A three-part version must gain a fourth field.");
+        if (PanelVersionPolicy.ToNumericVersion("1") != "1.0.0.0")
+            throw new InvalidOperationException("A one-part version must be padded.");
+        if (PanelVersionPolicy.ToNumericVersion("1.2") != "1.2.0.0")
+            throw new InvalidOperationException("A two-part version must be padded.");
+        if (PanelVersionPolicy.ToNumericVersion("1.2.3.4") != "1.2.3.4")
+            throw new InvalidOperationException("A four-part version must pass through.");
+        if (PanelVersionPolicy.ToNumericVersion("  1.2.3  ") != "1.2.3.0")
+            throw new InvalidOperationException("Surrounding whitespace must be tolerated.");
+
+        // A pre-release suffix is not numeric, so it must be dropped rather than emitted.
+        if (PanelVersionPolicy.ToNumericVersion("0.1.5-rc.1") != "0.1.5.0")
+            throw new InvalidOperationException("A pre-release suffix must be dropped: " + PanelVersionPolicy.ToNumericVersion("0.1.5-rc.1"));
+        if (PanelVersionPolicy.ToNumericVersion("0.1.5-alpha.2") != "0.1.5.0")
+            throw new InvalidOperationException("An alpha suffix must be dropped.");
+        if (PanelVersionPolicy.ToNumericVersion("0.1.5+build.7") != "0.1.5.0")
+            throw new InvalidOperationException("Build metadata must be dropped.");
+
+        // More than four fields cannot fit the resource, so the extra ones are trimmed.
+        if (PanelVersionPolicy.ToNumericVersion("1.2.3.4.5") != "1.2.3.4")
+            throw new InvalidOperationException("A five-part version must be trimmed to four.");
+
+        // The result must always be parseable as a Version.
+        Version parsed;
+        if (!Version.TryParse(PanelVersionPolicy.ToNumericVersion(PanelVersionPolicy.Version), out parsed))
+            throw new InvalidOperationException("The converted version must be a valid System.Version.");
+    }
+
+    private static void VerifyNumericRejections()
+    {
+        AssertThrows("blank version", delegate { PanelVersionPolicy.ToNumericVersion(""); });
+        AssertThrows("null version", delegate { PanelVersionPolicy.ToNumericVersion(null); });
+        AssertThrows("whitespace version", delegate { PanelVersionPolicy.ToNumericVersion("   "); });
+        AssertThrows("non-numeric part", delegate { PanelVersionPolicy.ToNumericVersion("1.x.3"); });
+        AssertThrows("negative part", delegate { PanelVersionPolicy.ToNumericVersion("1.-2.3"); });
+        // A suffix-only value has no numeric core at all.
+        AssertThrows("suffix only", delegate { PanelVersionPolicy.ToNumericVersion("-rc.1"); });
+    }
+
+    private static void VerifyPackageName()
+    {
+        string name = PanelVersionPolicy.BuildInstallerFileName("0.1.0");
+        if (name != "DeepSeekHarnessControlPanel-0.1.0-setup.exe")
+            throw new InvalidOperationException("Unexpected package name: " + name);
+        // A pre-release keeps its suffix in the file name; only the resource drops it.
+        string preRelease = PanelVersionPolicy.BuildInstallerFileName("0.1.5-rc.1");
+        if (preRelease != "DeepSeekHarnessControlPanel-0.1.5-rc.1-setup.exe")
+            throw new InvalidOperationException("A pre-release package name must keep its suffix: " + preRelease);
+        // No timestamp: a release must replace its predecessor rather than pile up.
+        if (name.IndexOf(DateTime.Now.Year.ToString(), StringComparison.Ordinal) >= 0)
+            throw new InvalidOperationException("The package name must not carry a date.");
+
+        AssertThrows("blank package version", delegate { PanelVersionPolicy.BuildInstallerFileName(""); });
+        AssertThrows("null package version", delegate { PanelVersionPolicy.BuildInstallerFileName(null); });
+    }
+
+    private static void AssertThrows(string label, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+        throw new InvalidOperationException("Expected an InvalidOperationException for " + label + ".");
+    }
+}

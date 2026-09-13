@@ -8,6 +8,9 @@
 - `assets/DeepSeekHarness.ico`：蓝鲸程序图标
 - `scripts/build.ps1`：本地构建脚本
 - `scripts/test.ps1`：策略层测试脚本
+- `scripts/build-installer.ps1`：生成 per-user 安装包
+- `scripts/verify-installer.ps1`：校验安装脚本（不需要 Inno Setup）
+- `installer/DeepSeekHarnessControlPanel.iss`：Inno Setup 安装脚本
 - `tests/`：策略类测试（纯逻辑，不依赖网络与 Harness 安装）
 
 本仓库不包含 API Key、用户配置、Harness 安装目录、依赖缓存或测试日志。
@@ -41,6 +44,43 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1 -OutputDirectory .\b
 1. 在未安装 Harness 的电脑上点击“一键安装”并选择空目录。
 2. 安装完成后使用“启动”“重启”“停止”控制服务。
 3. “检查 Harness 更新”仅检查官方 `deepseek-ai/deepseek-harness` 仓库的更新，不更新此控制面板。
+4. 关闭窗口会最小化到托盘；首次关闭会说明这一点。要完全退出请用托盘菜单里的“退出”。
+5. “彻底卸载”会列出每个删除目标及大小，其中**用户数据默认不勾选**。
+
+## 安装包
+
+需要先安装 [Inno Setup 6](https://jrsoftware.org/isdl.php)（免费），然后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
+```
+
+版本号从源码里的 `PanelVersionPolicy.Version` 读取，因此可执行文件的版本资源和安装包不会不一致。产物位于 `bin\installer\`。
+
+没有安装 Inno Setup 时，脚本会说明缺少什么并以退出码 2 结束，而不会抛出堆栈。
+
+### 安装包的行为
+
+- **免 UAC**：安装到 `%LOCALAPPDATA%\Programs\DeepSeekHarnessControlPanel`，全程不需要管理员权限。
+- **升级**：使用固定 `AppId`，新版本替换旧版本而不是并排安装。
+- **开机自启**：默认不勾选；勾选后写入 `HKCU` 的 `Run` 项，与面板内的同名开关是同一处。
+- 安装包只包含控制面板本身，Harness 仍由面板自行安装。
+
+### 卸载边界（重要）
+
+安装包的卸载器**只删除控制面板自己**，不会碰以下任何内容：
+
+- Harness 安装目录（例如 `C:\dsh`）及其 `.dsh-runtime`、`logs`
+- `%USERPROFILE%\.dsh` —— 其中的 API Key、会话记录和附件删掉无法恢复
+- Harness 安装目录内的 `.dsh-manager-state.json`
+
+删除 Harness 请使用面板内的“彻底卸载”。两者必须严格分开：卸载一个几百 KB 的面板不应该连带丢掉无法恢复的凭据和会话。
+
+这条边界不只写在注释里，`scripts\verify-installer.ps1` 会实际检查它——任何指向上述路径的指令、或 `[UninstallDelete]` 里的递归删除，都会让校验失败：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-installer.ps1
+```
 
 ## 说明
 
