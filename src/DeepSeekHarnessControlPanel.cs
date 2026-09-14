@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.6.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.6.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.6")]
+[assembly: System.Reflection.AssemblyVersion("0.1.7.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.7.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.7")]
 
 public enum StopTargetKind
 {
@@ -2308,7 +2308,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.6";
+    public const string Version = "0.1.7";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.
@@ -3142,9 +3142,15 @@ public sealed class ManagerForm : Form
     {
         if (updateCheckRunning)
             return;
+        string today = DateTime.Now.ToString("yyyy-MM-dd");
+        if (String.Equals(LoadSetting("lastAutoUpdateCheckDate"), today, StringComparison.Ordinal))
+            return;
         updateCheckRunning = true;
         try
         {
+            // At most one automatic check per local calendar day. Manual checks do not
+            // use this marker and remain available at any time.
+            SaveSetting("lastAutoUpdateCheckDate", today);
             string branch = await GetDefaultBranchAsync();
             string remote = await GetRemoteCommitAsync(branch);
             string local = LocalCommit();
@@ -3275,7 +3281,7 @@ public sealed class ManagerForm : Form
         portLayout.RowCount = 1;
         portLayout.BackColor = Color.Transparent;
         portLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
-        portLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
+        portLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         portLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1));
         portLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         portLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -3291,6 +3297,8 @@ public sealed class ManagerForm : Form
         portCaption.Font = UiStyle.BodyFont();
         portCaption.ForeColor = UiStyle.TextSecondary;
         portCaption.Dock = DockStyle.Fill;
+        portCaption.AutoSize = false;
+        portCaption.MinimumSize = new Size(48, 0);
         portCaption.TextAlign = ContentAlignment.MiddleCenter;
         portCaption.BackColor = Color.Transparent;
         portLayout.Controls.Add(portCaption, 1, 0);
@@ -4113,42 +4121,55 @@ public sealed class ManagerForm : Form
             ? OperationCancellationPolicy.CancelButtonText
             : "检查更新";
 
-        // Every other action is disabled first, so no state can leave one of them live
-        // during an operation. That also makes the early return below safe.
-        startButton.Enabled = false;
-        restartButton.Enabled = false;
-        stopButton.Enabled = false;
-        openButton.Enabled = false;
-        rescanButton.Enabled = false;
-        openFolderButton.Enabled = false;
-        uninstallButton.Enabled = false;
-
         if (cancellable)
         {
             // While a cancellable operation runs, the two buttons that could have
             // started it stay live as the way to stop it.
-            installButton.Enabled = true;
-            updateButton.Enabled = true;
+            SetButtonEnabled(installButton, true);
+            SetButtonEnabled(updateButton, true);
+            SetButtonEnabled(startButton, false);
+            SetButtonEnabled(restartButton, false);
+            SetButtonEnabled(stopButton, false);
+            SetButtonEnabled(openButton, false);
+            SetButtonEnabled(rescanButton, false);
+            SetButtonEnabled(openFolderButton, false);
+            SetButtonEnabled(uninstallButton, false);
             return;
         }
 
         if (!enabled)
         {
-            installButton.Enabled = false;
-            updateButton.Enabled = false;
+            SetButtonEnabled(installButton, false);
+            SetButtonEnabled(updateButton, false);
+            SetButtonEnabled(startButton, false);
+            SetButtonEnabled(restartButton, false);
+            SetButtonEnabled(stopButton, false);
+            SetButtonEnabled(openButton, false);
+            SetButtonEnabled(rescanButton, false);
+            SetButtonEnabled(openFolderButton, false);
+            SetButtonEnabled(uninstallButton, false);
             return;
         }
 
-        installButton.Enabled = (!snapshot.Installed || !snapshot.Ready) && !snapshot.MultipleInstalls;
-        updateButton.Enabled = snapshot.Ready && !snapshot.MultipleInstalls;
-        startButton.Enabled = snapshot.Ready && !snapshot.PortBusy && !snapshot.MultipleInstalls;
-        restartButton.Enabled = snapshot.Ready && snapshot.Running && !snapshot.MultipleInstalls;
-        stopButton.Enabled = snapshot.Running && !snapshot.MultipleInstalls;
-        openButton.Enabled = snapshot.Running;
-        rescanButton.Enabled = true;
-        openFolderButton.Enabled = Directory.Exists(Root);
-        uninstallButton.Enabled = snapshot.Installed && !snapshot.MultipleInstalls;
+        SetButtonEnabled(installButton, (!snapshot.Installed || !snapshot.Ready) && !snapshot.MultipleInstalls);
+        SetButtonEnabled(updateButton, snapshot.Ready && !snapshot.MultipleInstalls);
+        SetButtonEnabled(startButton, snapshot.Ready && !snapshot.PortBusy && !snapshot.MultipleInstalls);
+        SetButtonEnabled(restartButton, snapshot.Ready && snapshot.Running && !snapshot.MultipleInstalls);
+        SetButtonEnabled(stopButton, snapshot.Running && !snapshot.MultipleInstalls);
+        SetButtonEnabled(openButton, snapshot.Running);
+        SetButtonEnabled(rescanButton, true);
+        SetButtonEnabled(openFolderButton, Directory.Exists(Root));
+        SetButtonEnabled(uninstallButton, snapshot.Installed && !snapshot.MultipleInstalls);
     }
+
+    private static void SetButtonEnabled(Button button, bool enabled)
+    {
+        if (button.Enabled != enabled)
+        {
+            button.Enabled = enabled;
+        }
+    }
+
 
     private void Log(string message)
     {
@@ -4318,11 +4339,29 @@ public sealed class ManagerForm : Form
         discoveredRoots = probe.Roots;
         bool multiple = discoveredRoots.Count > 1;
         if (discoveredRoots.Count == 0)
-            pathBox.Text = "";
+        {
+            // Fall back to the persisted path before declaring the installation absent.
+            // Discovery can race with startup, but the configured install root remains
+            // the source of truth when its package tree is still present.
+            string configured = LoadConfiguredRoot();
+            if (IsSourceAt(configured))
+            {
+                pathBox.Text = configured;
+                discoveredRoots.Add(configured);
+                multiple = false;
+            }
+            else if (!IsSourceAt(Root))
+                pathBox.Text = "";
+        }
         else if (!multiple && !IsInstalled())
             pathBox.Text = discoveredRoots[0];
         if (multiple && !discoveredRoots.Contains(Root, StringComparer.OrdinalIgnoreCase))
             pathBox.Text = discoveredRoots[0];
+
+        // The path may have been filled from discovery above, so calculate the
+        // snapshot only after the final root is known.
+        if (discoveredRoots.Count > 0)
+            probe.Snapshot = ComputeStatusSnapshot(discoveredRoots);
 
         HarnessStatusSnapshot snapshot = probe.Snapshot;
         string change = force ? "" : HarnessStatusChangePolicy.DescribeChange(Port, lastSnapshot, snapshot);

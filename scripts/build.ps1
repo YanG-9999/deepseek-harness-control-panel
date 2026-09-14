@@ -24,8 +24,8 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 # The icon is embedded twice on purpose: /win32icon gives the executable its shell icon,
 # and /resource gives the panel the multi-frame copy it draws the brand mark from. The
 # associated-icon API only ever hands back the 32px frame, which is why the mark was soft.
-& $compiler /nologo /target:winexe /out:$output /win32icon:$icon /win32manifest:$manifest `
-    /resource:$icon,DeepSeekHarness.ico `
+& $compiler /nologo /target:winexe ('/out:' + $output) ('/win32icon:' + $icon) ('/win32manifest:' + $manifest) `
+    ('/resource:' + $icon + ',DeepSeekHarness.ico') `
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
     /r:System.Net.Http.dll `
