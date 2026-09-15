@@ -80,16 +80,16 @@ public static class HarnessInstallationValidatorTests
         if (DirectoryCleanupPolicy.ToExtendedPath("\\\\server\\share\\Harness") != "\\\\?\\UNC\\server\\share\\Harness")
             throw new InvalidOperationException("UNC cleanup paths must use the Windows extended-length prefix.");
 
-        // Passing the commit must never throw. The inherited environment can hold
-        // case-insensitive duplicate keys (HTTP_PROXY plus http_proxy), and touching
-        // ProcessStartInfo.EnvironmentVariables then throws ArgumentException; the
-        // commit hash is diagnostic, so degrading to "not set" is the correct
+        // Passing the public build values must never throw. The inherited environment can
+        // hold case-insensitive duplicate keys (HTTP_PROXY plus http_proxy), and touching
+        // ProcessStartInfo.EnvironmentVariables then throws ArgumentException; these values
+        // are diagnostic metadata for the build, so degrading to "not set" is the correct
         // outcome rather than a failed build.
         var process = new System.Diagnostics.ProcessStartInfo();
         bool applied;
         try
         {
-            applied = BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534");
+            applied = BuildCommitEnvironment.Apply(process, "141eb6fef83422698aef7a981029e843e8161534", "0.1.5-rc.2");
         }
         catch (Exception error)
         {
@@ -115,12 +115,26 @@ public static class HarnessInstallationValidatorTests
             string commit = process.EnvironmentVariables[BuildCommitEnvironment.VariableName];
             if (commit != "141eb6fef83422698aef7a981029e843e8161534")
                 throw new InvalidOperationException("The official source commit was not passed to the build environment.");
+            string version = process.EnvironmentVariables[BuildCommitEnvironment.VersionVariableName];
+            if (version != "0.1.5-rc.2")
+                throw new InvalidOperationException("The official source version was not passed to the build environment.");
         }
 
-        // A null process or blank commit must be tolerated by the same entry point.
-        if (BuildCommitEnvironment.Apply(null, "141eb6fef83422698aef7a981029e843e8161534"))
+        // A null process or blank value must be tolerated by the same entry point.
+        if (BuildCommitEnvironment.Apply(null, "141eb6fef83422698aef7a981029e843e8161534", "0.1.5"))
             throw new InvalidOperationException("Applying to a null process must report that nothing was recorded.");
-        if (BuildCommitEnvironment.Apply(new System.Diagnostics.ProcessStartInfo(), "  "))
+        if (BuildCommitEnvironment.Apply(new System.Diagnostics.ProcessStartInfo(), "  ", "  "))
             throw new InvalidOperationException("Applying a blank commit must report that nothing was recorded.");
+
+        // Only known values may be written: an empty string would satisfy the official
+        // profile's presence check and embed a blank brand into the client artifacts.
+        if (!duplicateKeys)
+        {
+            var partial = new System.Diagnostics.ProcessStartInfo();
+            if (!BuildCommitEnvironment.Apply(partial, "141eb6fef83422698aef7a981029e843e8161534", ""))
+                throw new InvalidOperationException("A known commit with an unknown version is still worth recording.");
+            if (partial.EnvironmentVariables.ContainsKey(BuildCommitEnvironment.VersionVariableName))
+                throw new InvalidOperationException("An unknown version must not be written as an empty value.");
+        }
     }
 }

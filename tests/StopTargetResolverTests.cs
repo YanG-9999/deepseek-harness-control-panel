@@ -53,6 +53,8 @@ public static class StopTargetResolverTests
         LogLineFormatterTests.Run();
         LogViewRenderingTests.Run();
         HarnessInstallationValidatorTests.Run();
+        HarnessBuildPolicyTests.Run();
+        PanelSettingsPolicyTests.Run();
         HarnessStartupPolicyTests.Run();
         HarnessLifecyclePolicyTests.Run();
         HarnessProfileDiagnosticsTests.Run();

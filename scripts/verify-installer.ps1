@@ -153,6 +153,30 @@ if ($null -ne $registryBody) {
 Assert-Iss ($issDirectives -match '(?m)^\s*OutputDir\s*=') 'OutputDir must be set so the package lands in a known place.'
 Assert-Iss ($issDirectives -match '\{uninstallexe\}') 'A Start Menu uninstall entry makes removal discoverable.'
 
+# --- nothing at the end of setup goes through a file association -------------
+# isreadme makes Setup display the file with ShellExecute. Where the extension has no
+# handler - a stock Windows has none for .md - that is the "choose an app to open this
+# file" chooser, and because the postinstall entry starts the panel at the same moment
+# the user reasonably reads the dialog as a panel bug. A comment cannot catch that, so
+# the flag and the launch method are both checked.
+$filesBody = Get-IssSection 'Files'
+Assert-Iss ($null -ne $filesBody) 'A [Files] section is required to install the panel and its readme.'
+if ($null -ne $filesBody) {
+    Assert-Iss ($filesBody -notmatch '(?i)\bisreadme\b') `
+        'No [Files] entry may use isreadme: Setup would open it through the shell association.'
+    Assert-Iss ($filesBody -match '(?i)README\.md') `
+        'The readme must still be installed next to the panel.'
+}
+
+$runBody = Get-IssSection 'Run'
+Assert-Iss ($null -ne $runBody) 'A [Run] section is required for the postinstall launch.'
+if ($null -ne $runBody) {
+    Assert-Iss ($runBody -match '(?i)notepad\.exe') `
+        'The readme must be offered through Notepad, which needs no file association.'
+    Assert-Iss ($runBody -notmatch '(?i)Filename:\s*"[^"]*\.md"') `
+        'No [Run] entry may launch the document itself; that needs a handler the machine may not have.'
+}
+
 Write-Host ("Installer script checks run: {0}" -f $checks)
 if ($failures.Count -gt 0) {
     Write-Host ''

@@ -22,6 +22,8 @@ $testSources = @(
     (Join-Path $projectRoot 'tests\LogLineFormatterTests.cs'),
     (Join-Path $projectRoot 'tests\LogViewRenderingTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessInstallationValidatorTests.cs'),
+    (Join-Path $projectRoot 'tests\HarnessBuildPolicyTests.cs'),
+    (Join-Path $projectRoot 'tests\PanelSettingsPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessStartupPolicyTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessLifecyclePolicyTests.cs'),
     (Join-Path $projectRoot 'tests\HarnessProfileDiagnosticsTests.cs'),

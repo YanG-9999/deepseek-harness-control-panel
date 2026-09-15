@@ -71,7 +71,11 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 Source: "..\bin\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+; No isreadme flag: Inno displays such a file with ShellExecute, and a machine with no
+; association for .md answers that with the Windows "choose an app" chooser - which the
+; user then blames on the panel, because the postinstall entry launches it at the same
+; moment. The readme is still installed; [Run] below offers it through Notepad instead.
+Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -86,6 +90,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+; Notepad, not the file's association: this must work on a machine where .md opens nothing,
+; and it stays unchecked so nobody gets a document they did not ask for.
+Filename: "notepad.exe"; Parameters: """{app}\README.md"""; Description: "查看使用说明"; \
+    Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallDelete]
 ; 只清理安装程序自己创建的目录，且仅当它为空时才真的删除。

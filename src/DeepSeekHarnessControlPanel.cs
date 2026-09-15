@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.7.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.7.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.7")]
+[assembly: System.Reflection.AssemblyVersion("0.1.8.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.8.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.8")]
 
 public enum StopTargetKind
 {
@@ -483,7 +483,93 @@ public static class BuildRetryPolicy
 {
     public static bool ShouldRetry(string command, int attempt)
     {
-        return String.Equals(command, "pnpm run build", StringComparison.OrdinalIgnoreCase) && attempt == 1;
+        return attempt == 1 && HarnessBuildPolicy.IsBuildCommand(command);
+    }
+}
+
+/// <summary>
+/// Chooses which Harness build the panel runs.
+///
+/// The client brand is compiled into the browser artifacts, so a plain build always
+/// ships the "本地构建" fallback and the official look disappears after every update.
+/// The official profile restores it, at the cost of requiring two public values the
+/// build refuses to invent: the source commit and the source version. When either is
+/// unknown the panel falls back to the plain build rather than failing an install.
+/// </summary>
+public static class HarnessBuildPolicy
+{
+    public const string PlainCommand = "pnpm run build";
+    public const string OfficialCommand = "pnpm run build:official";
+
+    public static bool IsBuildCommand(string command)
+    {
+        return String.Equals(command, PlainCommand, StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(command, OfficialCommand, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether the downloaded source declares the official profile script.</summary>
+    public static bool DeclaresOfficialProfile(string packageJson)
+    {
+        return !String.IsNullOrEmpty(packageJson) &&
+            Regex.IsMatch(packageJson, "\"build:official\"\\s*:");
+    }
+
+    public static bool CanBuildOfficialProfile(string packageJson, string commit, string version)
+    {
+        return DeclaresOfficialProfile(packageJson) &&
+            Regex.IsMatch(commit ?? "", "^[0-9a-fA-F]{7,40}$") &&
+            !String.IsNullOrWhiteSpace(version);
+    }
+
+    public static string ChooseCommand(string packageJson, string commit, string version)
+    {
+        return CanBuildOfficialProfile(packageJson, commit, version) ? OfficialCommand : PlainCommand;
+    }
+}
+
+/// <summary>
+/// The settings file the panel owns, and the merge rule used to write it.
+///
+/// The writer keeps only the keys it knows and drops everything else, which is what
+/// makes a partially understood file safe to rewrite. The cost is that a key missing
+/// from <see cref="KnownKeys"/> is erased the next time a different key is saved -
+/// that is how the daily update-check marker was lost on every install. The merge is
+/// a pure function so that rule is testable without touching a real file.
+/// </summary>
+public static class PanelSettingsPolicy
+{
+    public const string InstallRootKey = "installRoot";
+    public const string LastAutoUpdateCheckDateKey = "lastAutoUpdateCheckDate";
+
+    /// <summary>Every key the panel reads or writes. A new setting must be added here.</summary>
+    public static readonly string[] KnownKeys = new[]
+    {
+        InstallRootKey,
+        LastAutoUpdateCheckDateKey
+    };
+
+    /// <summary>
+    /// Combines the known values already on disk with the one being written. A blank
+    /// value for a known key is treated as absent, so an empty string can never look
+    /// like a configured install root.
+    /// </summary>
+    public static Dictionary<string, string> Merge(
+        IDictionary<string, string> existing,
+        string key,
+        string value)
+    {
+        if (String.IsNullOrWhiteSpace(key))
+            throw new ArgumentException("A settings key is required.", "key");
+
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string known in KnownKeys)
+        {
+            string current;
+            if (existing != null && existing.TryGetValue(known, out current) && !String.IsNullOrEmpty(current))
+                merged[known] = current;
+        }
+        merged[key] = value ?? "";
+        return merged;
     }
 }
 
@@ -599,6 +685,7 @@ public static class HarnessInstallPolicy
 public static class BuildCommitEnvironment
 {
     public const string VariableName = "DSH_CLIENT_COMMIT_HASH";
+    public const string VersionVariableName = "DSH_CLIENT_VERSION";
 
     /// <summary>
     /// Passes the official source commit to a child process.
@@ -610,15 +697,28 @@ public static class BuildCommitEnvironment
     /// inherited environment fails on the collision. The commit hash is diagnostic
     /// metadata, so dropping it is strictly better than failing the build.
     /// </summary>
-    /// <returns>True when the commit was recorded, false when it had to be dropped.</returns>
-    public static bool Apply(ProcessStartInfo process, string commit)
+    /// <returns>True when the public build values were recorded.</returns>
+    public static bool Apply(ProcessStartInfo process, string commit, string version)
     {
-        if (process == null || String.IsNullOrWhiteSpace(commit))
+        if (process == null)
             return false;
+        bool applied = false;
         try
         {
-            process.EnvironmentVariables[VariableName] = commit.Trim();
-            return true;
+            // The official build profile reads both of these and refuses to run without
+            // them, so each one is written only when it is actually known. Writing an
+            // empty value would satisfy that check and embed a blank brand instead.
+            if (!String.IsNullOrWhiteSpace(commit))
+            {
+                process.EnvironmentVariables[VariableName] = commit.Trim();
+                applied = true;
+            }
+            if (!String.IsNullOrWhiteSpace(version))
+            {
+                process.EnvironmentVariables[VersionVariableName] = version.Trim();
+                applied = true;
+            }
+            return applied;
         }
         catch (ArgumentException)
         {
@@ -2308,7 +2408,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.7";
+    public const string Version = "0.1.8";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.
@@ -3009,6 +3109,7 @@ public sealed class ManagerForm : Form
     private string selectedPnpm = "";
     private string selectedCorepack = "";
     private string selectedSourceCommit = "";
+    private string selectedSourceVersion = "";
     private string nodeHelperPath = "";
 
     /// <summary>Guards against two overlapping automatic update checks.</summary>
@@ -3143,14 +3244,14 @@ public sealed class ManagerForm : Form
         if (updateCheckRunning)
             return;
         string today = DateTime.Now.ToString("yyyy-MM-dd");
-        if (String.Equals(LoadSetting("lastAutoUpdateCheckDate"), today, StringComparison.Ordinal))
+        if (String.Equals(LoadSetting(PanelSettingsPolicy.LastAutoUpdateCheckDateKey), today, StringComparison.Ordinal))
             return;
         updateCheckRunning = true;
         try
         {
             // At most one automatic check per local calendar day. Manual checks do not
             // use this marker and remain available at any time.
-            SaveSetting("lastAutoUpdateCheckDate", today);
+            SaveSetting(PanelSettingsPolicy.LastAutoUpdateCheckDateKey, today);
             string branch = await GetDefaultBranchAsync();
             string remote = await GetRemoteCommitAsync(branch);
             string local = LocalCommit();
@@ -4469,7 +4570,7 @@ public sealed class ManagerForm : Form
             await EnsureNodeAsync();
             await PreparePnpmAsync();
             await InstallDependenciesAsync("install");
-            await RunToolAsync("pnpm run build", "build");
+            await BuildHarnessAsync("build");
             await VerifyRunnableInstallationAsync();
             WriteState(commit);
             SaveConfiguredRoot(installRoot);
@@ -4836,7 +4937,7 @@ public sealed class ManagerForm : Form
             await EnsureNodeAsync();
             await PreparePnpmAsync();
             await InstallDependenciesAsync("update-install");
-            await RunToolAsync("pnpm run build", "update-build");
+            await BuildHarnessAsync("update-build");
             await VerifyRunnableInstallationAsync();
             WriteState(downloadedCommit);
             Log("新版本已构建完成，正在清理旧版本备份...");
@@ -4867,6 +4968,7 @@ public sealed class ManagerForm : Form
             if (Directory.Exists(Root) && cleanupError != null)
                 throw new InvalidOperationException("更新失败，自动回滚也未能完成。旧版本备份保留在: " + backup + Environment.NewLine + cleanupError.Message, updateError);
             selectedSourceCommit = ReadStateValue("commit");
+            selectedSourceVersion = ReadSourceVersion();
             throw;
         }
         finally
@@ -5066,6 +5168,54 @@ public sealed class ManagerForm : Form
     {
         bool hasLockfile = File.Exists(Path.Combine(Source, "pnpm-lock.yaml"));
         await RunToolAsync(HarnessInstallPolicy.BuildDependencyInstallCommand(hasLockfile), logName);
+    }
+
+    /// <summary>
+    /// Builds the downloaded Harness with the strongest profile its source supports.
+    ///
+    /// The brand shown in the browser is compiled into the client artifacts, so a plain
+    /// build always replaces the official look with the local-build fallback. The panel
+    /// therefore asks for the official profile whenever the source declares it and both
+    /// public values it needs are known, and says which one it used so a surprising
+    /// brand in the browser is explainable from the log alone.
+    /// </summary>
+    private async Task BuildHarnessAsync(string logName)
+    {
+        string manifestPath = Path.Combine(Source, "package.json");
+        string manifest = File.Exists(manifestPath) ? File.ReadAllText(manifestPath) : "";
+        selectedSourceVersion = ReadSourceVersion();
+
+        string command = HarnessBuildPolicy.ChooseCommand(manifest, selectedSourceCommit, selectedSourceVersion);
+        if (String.Equals(command, HarnessBuildPolicy.OfficialCommand, StringComparison.Ordinal))
+        {
+            Log("使用官方品牌构建：源码提供 build:official，提交 " + ShortCommit(selectedSourceCommit) +
+                "、版本 " + selectedSourceVersion + "。");
+        }
+        else
+        {
+            Log("源码未提供可用的 build:official，回退到普通构建；页面左上角会显示本地构建品牌。" +
+                (HarnessBuildPolicy.DeclaresOfficialProfile(manifest)
+                    ? "（缺少提交号或版本号）"
+                    : ""));
+        }
+        await RunToolAsync(command, logName);
+    }
+
+    private static string ShortCommit(string commit)
+    {
+        if (String.IsNullOrEmpty(commit))
+            return "未知";
+        return commit.Length > 7 ? commit.Substring(0, 7) : commit;
+    }
+
+    /// <summary>The downloaded source's own version, or blank when it cannot be read.</summary>
+    private string ReadSourceVersion()
+    {
+        string packageJson = Path.Combine(Source, "package.json");
+        if (!File.Exists(packageJson))
+            return "";
+        Match match = Regex.Match(File.ReadAllText(packageJson), "\"version\"\\s*:\\s*\"([^\"]+)\"");
+        return match.Success ? match.Groups[1].Value.Trim() : "";
     }
 
     private void ApplyWindowsHarnessCompatibility()
@@ -5565,7 +5715,7 @@ public sealed class ManagerForm : Form
                 .FirstOrDefault(key => String.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)) ?? "PATH";
             string nodePath = String.IsNullOrEmpty(selectedNodeDirectory) ? Runtime : selectedNodeDirectory;
             psi.EnvironmentVariables[pathKey] = nodePath + ";" + Environment.GetEnvironmentVariable("PATH");
-            BuildCommitEnvironment.Apply(psi, selectedSourceCommit);
+            BuildCommitEnvironment.Apply(psi, selectedSourceCommit, selectedSourceVersion);
         }
         catch (ArgumentException)
         {
@@ -6030,7 +6180,7 @@ public sealed class ManagerForm : Form
 
     private string LoadConfiguredRoot()
     {
-        string configured = LoadSetting("installRoot");
+        string configured = LoadSetting(PanelSettingsPolicy.InstallRootKey);
         if (!String.IsNullOrEmpty(configured))
             return configured;
         return DefaultInstallRoot();
@@ -6069,20 +6219,16 @@ public sealed class ManagerForm : Form
     private void SaveSetting(string key, string value)
     {
         Directory.CreateDirectory(SettingsDirectory);
-        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var existing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(SettingsFile))
         {
             string text = File.ReadAllText(SettingsFile);
-            // Only the keys named here are carried over, so a new setting has to be added
-            // to this list or the first write of any other key silently drops it.
-            foreach (string preserved in new[] { "installRoot" })
-            {
-                string current = ReadJsonValue(text, preserved);
-                if (!String.IsNullOrEmpty(current))
-                    settings[preserved] = current;
-            }
+            // Every known key is carried over, not just the one being written, so saving
+            // one setting can no longer erase another. See PanelSettingsPolicy.
+            foreach (string known in PanelSettingsPolicy.KnownKeys)
+                existing[known] = ReadJsonValue(text, known);
         }
-        settings[key] = value ?? "";
+        Dictionary<string, string> settings = PanelSettingsPolicy.Merge(existing, key, value);
 
         var builder = new StringBuilder();
         builder.Append("{");
@@ -6101,7 +6247,7 @@ public sealed class ManagerForm : Form
 
     private void SaveConfiguredRoot(string root)
     {
-        SaveSetting("installRoot", root);
+        SaveSetting(PanelSettingsPolicy.InstallRootKey, root);
     }
 
     private string ReadJsonValue(string json, string key)
