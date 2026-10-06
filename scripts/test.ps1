@@ -14,6 +14,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $app = Join-Path $OutputDirectory 'DeepSeekHarnessControlPanel.exe'
 $testSources = @(
+    (Join-Path $projectRoot 'tests\TrayBalanceTests.cs'),
+    (Join-Path $projectRoot 'tests\TrayPopupRenderingTests.cs'),
     (Join-Path $projectRoot 'tests\StopTargetResolverTests.cs'),
     (Join-Path $projectRoot 'tests\UninstallTargetPlannerTests.cs'),
     (Join-Path $projectRoot 'tests\ControlPanelLayoutTests.cs'),

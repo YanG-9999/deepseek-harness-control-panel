@@ -23,9 +23,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("DeepSeek Harness 控制面板")]
 [assembly: System.Reflection.AssemblyProduct("DeepSeek Harness Control Panel")]
 [assembly: System.Reflection.AssemblyCompany("")]
-[assembly: System.Reflection.AssemblyVersion("0.1.8.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.8.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.8")]
+[assembly: System.Reflection.AssemblyVersion("0.1.9.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.9.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.9")]
 
 public enum StopTargetKind
 {
@@ -2317,6 +2317,33 @@ public static class UiStyle
 /// </summary>
 public static class NativeMethods
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int RegisterWindowMessage(string name);
+
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowThreadProcessId(IntPtr window, out int processId);
+
+    /// <summary>
+    /// The process that currently owns the foreground window, or 0 when there is
+    /// none. The popup uses this to tell "the user switched to another application"
+    /// apart from "one of my own dialogs or menus took focus".
+    /// </summary>
+    public static int ForegroundProcessId()
+    {
+        IntPtr foreground = GetForegroundWindow();
+        if (foreground == IntPtr.Zero)
+            return 0;
+        int processId;
+        GetWindowThreadProcessId(foreground, out processId);
+        return processId;
+    }
+
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2408,7 +2435,7 @@ public static class PanelVersionPolicy
     /// <summary>
     /// The panel's version. Bump this when releasing; everything else derives from it.
     /// </summary>
-    public const string Version = "0.1.8";
+    public const string Version = "0.1.9";
 
     /// <summary>
     /// A four-part numeric version for the Win32 version resource and the installer.
@@ -3036,7 +3063,7 @@ public sealed class ProcessExecutionResult
     }
 }
 
-public sealed class ManagerForm : Form
+public sealed partial class ManagerForm : Form
 {
     private const string RepoInfoApi = "https://api.github.com/repos/deepseek-ai/deepseek-harness";
     private const string RepoApiTemplate = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/{0}";
@@ -3146,8 +3173,13 @@ public sealed class ManagerForm : Form
             Refresh();
     }
 
-    public ManagerForm()
+    public ManagerForm() : this(false)
     {
+    }
+
+    public ManagerForm(bool useTray)
+    {
+        trayMode = useTray;
         Text = "DeepSeek Harness 控制面板";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         // Sized to the design: the info card needs four columns side by side, and the
@@ -3166,7 +3198,10 @@ public sealed class ManagerForm : Form
         http.DefaultRequestHeaders.UserAgent.ParseAdd("DeepSeekHarnessManager/1.0");
         http.Timeout = TimeSpan.FromMinutes(20);
 
-        BuildUi();
+        if (trayMode)
+            BuildTrayUi();
+        else
+            BuildUi();
         pathBox.Text = LoadConfiguredRoot();
 
         // Nothing is known until the first reading comes back, so every action starts
@@ -3203,6 +3238,14 @@ public sealed class ManagerForm : Form
     /// </summary>
     private void OnFormClosing(object sender, FormClosingEventArgs e)
     {
+        // The X button and Alt+F4 arrive as UserClosing and hide the popup; a task
+        // manager kill or a Windows shutdown still exits, which is what those mean.
+        if (trayMode && !exitRequested && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
         if (e.CloseReason == CloseReason.WindowsShutDown || !busy)
             return;
 
@@ -3845,7 +3888,7 @@ public sealed class ManagerForm : Form
 
             try
             {
-                string text = LogExportPolicy.BuildExportText(logBox.Text, Root, now);
+                string text = LogExportPolicy.BuildExportText(trayMode ? trayExportLog.ToString() : logBox.Text, Root, now);
                 File.WriteAllText(dialog.FileName, text, new UTF8Encoding(false));
                 Log("日志已导出: " + dialog.FileName);
             }
@@ -3876,6 +3919,7 @@ public sealed class ManagerForm : Form
         if (answer != DialogResult.Yes)
             return;
         logBox.Clear();
+        trayExportLog.Clear();
     }
 
     /// <summary>
@@ -4235,6 +4279,7 @@ public sealed class ManagerForm : Form
             SetButtonEnabled(rescanButton, false);
             SetButtonEnabled(openFolderButton, false);
             SetButtonEnabled(uninstallButton, false);
+            SyncTray(snapshot);
             return;
         }
 
@@ -4249,6 +4294,7 @@ public sealed class ManagerForm : Form
             SetButtonEnabled(rescanButton, false);
             SetButtonEnabled(openFolderButton, false);
             SetButtonEnabled(uninstallButton, false);
+            SyncTray(snapshot);
             return;
         }
 
@@ -4261,6 +4307,7 @@ public sealed class ManagerForm : Form
         SetButtonEnabled(rescanButton, true);
         SetButtonEnabled(openFolderButton, Directory.Exists(Root));
         SetButtonEnabled(uninstallButton, snapshot.Installed && !snapshot.MultipleInstalls);
+        SyncTray(snapshot);
     }
 
     private static void SetButtonEnabled(Button button, bool enabled)
@@ -4271,6 +4318,8 @@ public sealed class ManagerForm : Form
         }
     }
 
+
+    private readonly StringBuilder trayExportLog = new StringBuilder();
 
     private void Log(string message)
     {
@@ -4284,6 +4333,11 @@ public sealed class ManagerForm : Form
         }
         if (IsDisposed || Disposing)
             return;
+        if (trayMode && logBox.TextLength > 120000)
+        {
+            logBox.Select(0, 30000);
+            logBox.SelectedText = "";
+        }
         string clean = StripAnsiSequences(message);
         string[] lines = clean.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
         foreach (string line in lines)
@@ -4291,14 +4345,22 @@ public sealed class ManagerForm : Form
             if (String.IsNullOrWhiteSpace(line))
                 continue;
             FormattedLogLine formatted = LogLineFormatter.Format(line);
+            string timestamp = DateTime.Now.ToString("HH:mm:ss");
+            if (trayMode)
+            {
+                trayExportLog.Append(timestamp).Append("    ").Append(LogLevelText(formatted.Kind).PadRight(7))
+                    .Append("  ").AppendLine(formatted.Text);
+                if (trayExportLog.Length > 120000) trayExportLog.Remove(0, 30000);
+            }
             logBox.SelectionStart = logBox.TextLength;
             logBox.SelectionLength = 0;
-            logBox.SelectionColor = UiStyle.Primary;
-            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + "    ");
-            logBox.SelectionColor = UiStyle.InkBlue;
-            logBox.AppendText(LogLevelText(formatted.Kind).PadRight(7) + "  ");
-            logBox.SelectionColor = LogColor(formatted.Kind);
-            logBox.AppendText(formatted.Text + Environment.NewLine);
+            logBox.SelectionColor = trayMode ? Color.FromArgb(71, 85, 105) : UiStyle.Primary;
+            logBox.AppendText(timestamp + (trayMode ? "  " : "    "));
+            logBox.SelectionColor = trayMode ? Color.FromArgb(71, 85, 105) : UiStyle.InkBlue;
+            logBox.AppendText(trayMode ? LogLevelText(formatted.Kind) + "  " : LogLevelText(formatted.Kind).PadRight(7) + "  ");
+            logBox.SelectionColor = trayMode && formatted.Kind == LogMessageKind.Normal ? Color.FromArgb(71, 85, 105) : LogColor(formatted.Kind);
+            string display = trayMode ? Regex.Replace(formatted.Text, @"(?<=官方提交: )[0-9a-fA-F]{40}\b", delegate(Match match) { return match.Value.Substring(0, 7); }) : formatted.Text;
+            logBox.AppendText(display + Environment.NewLine);
         }
         logBox.SelectionColor = logBox.ForeColor;
         logBox.ScrollToCaret();
@@ -4474,6 +4536,9 @@ public sealed class ManagerForm : Form
             lastSnapshot = snapshot;
         }
         SetButtons(!busy, snapshot);
+        if (trayMode && force)
+            Log("状态检测完成：" + snapshot.StatusText + "，" + snapshot.RunningText +
+                (snapshot.Running ? "；监听 127.0.0.1:3080。" : "。"));
         if (!String.IsNullOrEmpty(change))
             Log(change);
     }
@@ -6638,6 +6703,1169 @@ public sealed class UninstallSelectionForm : Form
     }
 }
 
+// Tray presentation uses the same ManagerForm operations and status probes as the
+// full window. Its geometry and fonts share one explicit scale; WinForms must not
+// apply a second font/DPI scaling pass to fixed-size popup rows.
+public sealed class TrayPanelContext : ApplicationContext
+{
+    public static readonly int ActivateMessage = NativeMethods.RegisterWindowMessage("DeepSeekHarnessControlPanel.ShowTrayPanel");
+    private readonly ManagerForm panel;
+    private readonly NotifyIcon tray;
+
+    public TrayPanelContext()
+    {
+        panel = new ManagerForm(true);
+        // Application.Run(context) automatically shows MainForm. A tray-only
+        // startup must instead own the form without assigning that property.
+        panel.FormClosed += delegate { ExitThread(); };
+        IntPtr handle = panel.Handle;
+        tray = new NotifyIcon();
+        using (Stream stream = typeof(TrayPanelContext).Assembly.GetManifestResourceStream("DeepSeekHarness.ico"))
+        using (var source = new Icon(stream))
+            tray.Icon = new Icon(source, SystemInformation.SmallIconSize);
+        tray.Text = "DeepSeek Harness · 右键打开控制面板";
+        tray.MouseClick += delegate(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right) panel.ToggleTrayPopup(Cursor.Position);
+        };
+        panel.TrayStateChanged += delegate(string state) { tray.Text = "DeepSeek Harness · " + state; };
+        tray.Visible = true;
+        panel.TrayAnchorProvider = delegate { return TrayIconLocation.GetAnchor(tray); };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            tray.Visible = false;
+            Icon icon = tray.Icon;
+            tray.Dispose();
+            if (icon != null) icon.Dispose();
+            panel.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+public sealed partial class ManagerForm
+{
+    public Func<Point?> TrayAnchorProvider;
+    private readonly bool trayMode;
+    private bool exitRequested;
+    private bool popupActivated;
+    private int popupInteraction;
+    private DateTime hiddenAt = DateTime.MinValue;
+    private TrayPopupView popup;
+    private readonly CancellationTokenSource balanceLifetime = new CancellationTokenSource();
+    private bool balanceLoading;
+    private DateTime balanceCheckedAt = DateTime.MinValue;
+    private Point trayAnchor;
+    public event Action<string> TrayStateChanged;
+
+    private void BuildTrayUi()
+    {
+        SuspendLayout();
+        AutoScaleMode = AutoScaleMode.None;
+        MinimumSize = Size.Empty;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false; // Fixed for the handle's entire lifetime: no recreation flash.
+        // The Windows notification overflow flyout is a topmost shell window. Keep
+        // this popup above it while it is visible, otherwise the flyout covers the
+        // lower part of the panel when the tray icon lives behind the up-arrow.
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        popup = new TrayPopupView(logBox);
+        popup.Dock = DockStyle.Fill;
+        Controls.Add(popup);
+        popup.Action += delegate(string action)
+        {
+            popupInteraction++;
+            try
+            {
+                switch (action)
+                {
+                    case "primary":
+                        if (operationCancellation != null) CancelOperation();
+                        else if (lastSnapshot != null && lastSnapshot.Running) StopClick(this, EventArgs.Empty);
+                        else if (lastSnapshot == null || !lastSnapshot.Ready) InstallClick(this, EventArgs.Empty);
+                        else StartClick(this, EventArgs.Empty);
+                        break;
+                    case "restart": RestartClick(this, EventArgs.Empty); break;
+                    case "page": OpenClick(this, EventArgs.Empty); break;
+                    case "folder": OpenFolderClick(this, EventArgs.Empty); break;
+                    case "update": UpdateClick(this, EventArgs.Empty); break;
+                    case "scan": RescanClick(this, EventArgs.Empty); break;
+                    case "uninstall": UninstallClick(this, EventArgs.Empty); break;
+                    case "close": Hide(); break;
+                    case "exit": ExitTray(); break;
+                    case "settings": ShowBalanceSettings(); break;
+                    case "balance": RefreshBalance(true); break;
+                    case "expand":
+                        popup.Expanded = !popup.Expanded;
+                        PositionTrayPopup(trayAnchor);
+                        break;
+                    case "export": LogExportClick(this, EventArgs.Empty); break;
+                    case "clear": LogClearClick(this, EventArgs.Empty); break;
+                }
+            }
+            finally { popupInteraction--; }
+        };
+        Activated += delegate { popupActivated = true; };
+        Deactivate += delegate
+        {
+            if (!popupActivated || IsDisposed) return;
+            BeginInvoke(new Action(delegate
+            {
+                if (IsDisposed) return;
+                // A dialog, a context menu, or the tray click its self must keep the popup
+                // open: only a different application taking focus hides it.
+                if (NativeMethods.ForegroundProcessId() == Process.GetCurrentProcess().Id) return;
+                if (!Visible || ContainsFocus || busy) return;
+                if (popupInteraction != 0 || popup.MenuOpen || OwnedForms.Any(form => form.Visible)) return;
+                Hide();
+            }));
+        };
+        VisibleChanged += delegate
+        {
+            if (!Visible) { popupActivated = false; hiddenAt = DateTime.UtcNow; }
+        };
+        FormClosed += delegate { balanceLifetime.Cancel(); balanceLifetime.Dispose(); };
+        PositionTrayPopup();
+        ResumeLayout(true);
+    }
+
+    public void ToggleTrayPopup()
+    {
+        ToggleTrayPopup(Cursor.Position);
+    }
+
+    public void ToggleTrayPopup(Point anchor)
+    {
+        // The tray click first deactivates the popup, then delivers MouseClick.
+        if (Visible || (DateTime.UtcNow - hiddenAt).TotalMilliseconds < 250) Hide();
+        else ShowTrayPopup(anchor);
+    }
+
+    public void ShowTrayPopup()
+    {
+        Point? anchor = TrayAnchorProvider == null ? null : TrayAnchorProvider();
+        Rectangle area = Screen.PrimaryScreen.WorkingArea;
+        ShowTrayPopup(anchor ?? new Point(area.Right - 1, area.Bottom - 1));
+    }
+
+    public void ShowTrayPopup(Point anchor)
+    {
+        if (!trayMode || IsDisposed) return;
+        trayAnchor = anchor;
+        PositionTrayPopup(trayAnchor);
+        popupActivated = false;
+        Show();
+        Activate();
+        NativeMethods.SetForegroundWindow(Handle);
+        QueueStateRefresh(false);
+        RefreshBalance(false);
+    }
+
+    private void PositionTrayPopup()
+    {
+        Rectangle area = Screen.PrimaryScreen.WorkingArea;
+        PositionTrayPopup(new Point(area.Right - 1, area.Bottom - 1));
+    }
+
+    private void PositionTrayPopup(Point anchor)
+    {
+        Screen screen = Screen.FromPoint(anchor);
+        float dpi = TrayPopupLayout.DpiAt(anchor);
+        Rectangle bounds = TrayPopupLayout.Bounds(screen.WorkingArea, dpi, popup.Expanded, anchor);
+        Bounds = bounds;
+        popup.ApplyScale(TrayPopupLayout.Scale(screen.WorkingArea, dpi));
+        // Windows 11 provides the rounded frame and shadow without a layered window.
+        if (IsHandleCreated) TrayPopupLayout.RoundWindow(Handle);
+    }
+
+    public void ExitTray()
+    {
+        exitRequested = true;
+        Close();
+        if (!IsDisposed) exitRequested = false; // User cancelled an in-flight-operation warning.
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (trayMode && keyData == Keys.Escape) { Hide(); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if (trayMode && message.Msg == TrayPanelContext.ActivateMessage)
+        {
+            ShowTrayPopup();
+            return;
+        }
+        base.WndProc(ref message);
+    }
+
+    private void SyncTray(HarnessStatusSnapshot snapshot)
+    {
+        if (popup == null) return;
+        Button primary = operationCancellation != null || !snapshot.Ready ? installButton :
+            (snapshot.Running ? stopButton : startButton);
+        string text = operationCancellation != null ? "取消" : !snapshot.Ready ? installButton.Text :
+            (snapshot.Running ? "停止" : "启动");
+        popup.Sync(snapshot, Root, text, primary.Enabled, restartButton.Enabled, openButton.Enabled,
+            openFolderButton.Enabled, updateButton.Enabled, rescanButton.Enabled, uninstallButton.Enabled,
+            busy ? runningOperationTitle : "");
+        if (TrayStateChanged != null) TrayStateChanged(busy ? "操作中" : snapshot.RunningText);
+    }
+
+    private async void RefreshBalance(bool manual)
+    {
+        if (balanceLoading || IsDisposed || (!manual && (DateTime.UtcNow - balanceCheckedAt).TotalMinutes < 5)) return;
+        string key;
+        try { key = DeepSeekBalanceClient.LoadKey(); }
+        catch (Exception) { popup.SetBalance("—", "无法读取密钥，请在设置中重新保存"); return; }
+        if (String.IsNullOrWhiteSpace(key))
+        {
+            popup.SetBalance("—", "点击右上角设置，配置 DeepSeek API Key");
+            return;
+        }
+        balanceLoading = true;
+        popup.SetBalanceLoading(true);
+        try
+        {
+            BalanceResult result = await DeepSeekBalanceClient.FetchAsync(key, balanceLifetime.Token, FindExecutable("node.exe"));
+            if (!IsDisposed)
+            {
+                balanceCheckedAt = DateTime.UtcNow;
+                popup.SetBalance(result.Amount, (result.Available ? "可用余额" : "余额不足") +
+                    " · 更新于 " + DateTime.Now.ToString("HH:mm"));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed) popup.SetBalance("—", "查询超时，请重试");
+        }
+        catch (Exception error)
+        {
+            if (!IsDisposed) popup.SetBalance("—", error is BalanceQueryException ? error.Message : "连接失败，请检查网络后重试");
+        }
+        finally
+        {
+            balanceLoading = false;
+            if (!IsDisposed) popup.SetBalanceLoading(false);
+        }
+    }
+
+    private void ShowBalanceSettings()
+    {
+        using (var settings = new BalanceSettingsForm())
+        {
+            if (settings.ShowDialog(this) == DialogResult.OK)
+            {
+                balanceCheckedAt = DateTime.MinValue;
+                RefreshBalance(true);
+            }
+        }
+    }
+}
+
+public static class TrayIconLocation
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Identifier { public uint Size; public IntPtr Window; public uint Id; public Guid Guid; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IconRect { public int Left, Top, Right, Bottom; }
+    [DllImport("shell32.dll")]
+    private static extern int Shell_NotifyIconGetRect(ref Identifier identifier, out IconRect rectangle);
+
+    public static Point? GetAnchor(NotifyIcon icon)
+    {
+        // .NET Framework NotifyIcon owns the shell window/id privately. If that
+        // implementation changes, use the explicit bottom-right fallback.
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var windowField = typeof(NotifyIcon).GetField("window", flags);
+        var idField = typeof(NotifyIcon).GetField("id", flags);
+        if (windowField == null || idField == null) return null;
+        var window = windowField.GetValue(icon) as NativeWindow;
+        if (window == null || window.Handle == IntPtr.Zero) return null;
+        var identifier = new Identifier { Size = (uint)Marshal.SizeOf(typeof(Identifier)),
+            Window = window.Handle, Id = (uint)(int)idField.GetValue(icon) };
+        IconRect rectangle;
+        try
+        {
+            if (Shell_NotifyIconGetRect(ref identifier, out rectangle) != 0 ||
+                rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top) return null;
+        }
+        catch (EntryPointNotFoundException) { return null; }
+        Point center = new Point(rectangle.Left + (rectangle.Right - rectangle.Left) / 2,
+            rectangle.Top + (rectangle.Bottom - rectangle.Top) / 2);
+        // An icon in a closed overflow flyout may have stale off-screen bounds.
+        if (!Screen.AllScreens.Any(screen => screen.Bounds.Contains(center))) return null;
+        return center;
+    }
+}
+
+public static class TrayPopupLayout
+{
+    [StructLayout(LayoutKind.Sequential)] private struct PointNative { public int X; public int Y; }
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(PointNative point, int flags);
+    [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+    public static float DpiAt(Point point)
+    {
+        try
+        {
+            uint x, y;
+            if (GetDpiForMonitor(MonitorFromPoint(new PointNative { X = point.X, Y = point.Y }, 2), 0, out x, out y) == 0)
+                return x;
+        }
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
+        using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero)) return graphics.DpiX;
+    }
+
+    public static float Scale(Rectangle area, float dpi)
+    {
+        // Keep text readable on high-DPI, low-resolution screens while reserving
+        // at least a compact log area. Normal screens use their full DPI scale.
+        // The popup is authored in 96 DPI device pixels: one design pixel is one
+        // pixel at 100% scaling, so the monitor DPI is the whole factor.
+        return Math.Min(dpi / 96F, Math.Min((area.Width - 16) / 520F, (area.Height - 16) / 728F));
+    }
+
+    public static Rectangle Bounds(Rectangle area, float dpi, bool expanded)
+    {
+        return Bounds(area, dpi, expanded, new Point(area.Right, area.Bottom));
+    }
+
+    /// <summary>
+    /// Places the popup above and to the left of the tray icon that opened it.
+    /// The old overload remains the deterministic, bottom-right layout used by
+    /// rendering tests and callers that do not have a tray anchor.
+    /// </summary>
+    public static Rectangle Bounds(Rectangle area, float dpi, bool expanded, Point anchor)
+    {
+        float scale = Scale(area, dpi);
+        int gap = Math.Max(6, (int)(8 * scale));
+        int width = Math.Min((int)Math.Round(520 * scale), area.Width - gap * 2);
+        int height = Math.Min((int)Math.Round((expanded ? 838 : 728) * scale), area.Height - gap * 2);
+        // A taskbar icon is below the monitor working area. An icon inside the
+        // Windows overflow flyout is above it, so use the actual cursor point in
+        // both cases and keep the popup's lower-right corner next to that point.
+        int right = anchor.X + gap;
+        int bottom = anchor.Y - gap;
+        if (anchor.Y >= area.Bottom) bottom = area.Bottom;
+        if (right > area.Right - gap) right = area.Right - gap;
+        if (right < area.Left + width + gap) right = area.Left + width + gap;
+        if (bottom > area.Bottom - gap) bottom = area.Bottom - gap;
+        if (bottom < area.Top + height + gap) bottom = area.Top + height + gap;
+        int x = right - width;
+        int y = bottom - height;
+        if (x < area.Left + gap) x = area.Left + gap;
+        if (y < area.Top + gap) y = area.Top + gap;
+        return new Rectangle(x, y, width, height);
+    }
+
+    public static void RoundWindow(IntPtr handle)
+    {
+        try { int preference = 2; DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int)); }
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
+    }
+}
+
+public sealed class BalanceQueryException : Exception
+{
+    public BalanceQueryException(string message) : base(message) { }
+}
+
+public sealed class BalanceResult
+{
+    public string Amount;
+    public bool Available;
+}
+
+public static class DeepSeekBalanceClient
+{
+    public const string Endpoint = "https://api.deepseek.com/user/balance";
+    private static string KeyFile { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepSeekHarnessManager", "balance-key.dat"); } }
+
+    public static string LoadKey()
+    {
+        if (File.Exists(KeyFile)) return StateSecretProtection.Unprotect(File.ReadAllText(KeyFile));
+        return Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY") ?? "";
+    }
+
+    public static bool HasSavedKey { get { return File.Exists(KeyFile); } }
+
+    public static void SaveKey(string key)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(KeyFile));
+        File.WriteAllText(KeyFile, StateSecretProtection.Protect(key.Trim()));
+    }
+
+    public static void ClearKey()
+    {
+        if (File.Exists(KeyFile)) File.Delete(KeyFile);
+    }
+
+    public static async Task<BalanceResult> FetchAsync(string key, CancellationToken cancellation, string nodePath)
+    {
+        try { return await FetchDotNetAsync(key, cancellation); }
+        catch (HttpRequestException)
+        {
+            if (String.IsNullOrEmpty(nodePath) || !File.Exists(nodePath)) throw;
+        }
+        return await FetchNodeAsync(key, cancellation, nodePath);
+    }
+
+    private static async Task<BalanceResult> FetchDotNetAsync(string key, CancellationToken cancellation)
+    {
+        // Never forward the bearer token to a redirect or a user-controlled host.
+        using (var handler = new HttpClientHandler { AllowAutoRedirect = false })
+        using (var client = new HttpClient(handler))
+        using (var request = new HttpRequestMessage(HttpMethod.Get, Endpoint))
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key.Trim());
+            using (HttpResponseMessage response = await client.SendAsync(request, cancellation))
+            {
+                if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+                    throw new BalanceQueryException("API Key 无效或无权限，请检查设置");
+                if ((int)response.StatusCode == 429) throw new BalanceQueryException("查询过于频繁，请稍后重试");
+                if (!response.IsSuccessStatusCode) throw new BalanceQueryException("余额服务暂不可用，请稍后重试");
+                return Parse(await response.Content.ReadAsStringAsync());
+            }
+        }
+    }
+
+    private static async Task<BalanceResult> FetchNodeAsync(string key, CancellationToken cancellation, string nodePath)
+    {
+        // The secret crosses stdin only, never command-line arguments, a temporary
+        // script, logs, or a configurable URL. Node keeps normal certificate checks.
+        const string script = "let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);" +
+            "process.stdin.on('end',()=>{const key=JSON.parse(input).key;" +
+            "const req=require('https').get('https://api.deepseek.com/user/balance'," +
+            "{headers:{Authorization:'Bearer '+key,Accept:'application/json'},rejectUnauthorized:true},res=>{" +
+            "let body='';res.setEncoding('utf8');res.on('data',c=>{body+=c;if(body.length>65536)req.destroy();});" +
+            "res.on('end',()=>{process.stdout.write(JSON.stringify({status:res.statusCode,body}));});});" +
+            "req.setTimeout(15000,()=>req.destroy());req.on('error',()=>{process.exitCode=1;});});";
+        var info = new ProcessStartInfo(nodePath, "-e " + NodeNetworkPolicy.QuoteArgument(script));
+        info.UseShellExecute = false; info.CreateNoWindow = true;
+        info.RedirectStandardInput = info.RedirectStandardOutput = info.RedirectStandardError = true;
+        info.EnvironmentVariables.Remove("NODE_OPTIONS");
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
+        using (var process = new Process { StartInfo = info })
+        {
+            timeout.CancelAfter(20000);
+            process.Start();
+            using (timeout.Token.Register(delegate { try { if (!process.HasExited) process.Kill(); } catch (InvalidOperationException) { } catch (System.ComponentModel.Win32Exception) { } }))
+            {
+                Task<string> output = process.StandardOutput.ReadToEndAsync();
+                Task<string> errors = process.StandardError.ReadToEndAsync();
+                await process.StandardInput.WriteAsync(new JavaScriptSerializer().Serialize(new { key = key }));
+                process.StandardInput.Close();
+                await Task.Run(delegate { process.WaitForExit(); });
+                string response = await output; await errors;
+                timeout.Token.ThrowIfCancellationRequested();
+                if (process.ExitCode != 0) throw new BalanceQueryException("连接失败，请检查网络后重试");
+                var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(response);
+                int status = Convert.ToInt32(data["status"]);
+                if (status == 401 || status == 403) throw new BalanceQueryException("API Key 无效或无权限，请检查设置");
+                if (status == 429) throw new BalanceQueryException("查询过于频繁，请稍后重试");
+                if (status != 200) throw new BalanceQueryException("余额服务暂不可用，请稍后重试");
+                return Parse(Convert.ToString(data["body"]));
+            }
+        }
+    }
+
+    public static BalanceResult Parse(string json)
+    {
+        var data = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+        object available, items;
+        if (data == null || !data.TryGetValue("is_available", out available) || !(available is bool) ||
+            !data.TryGetValue("balance_infos", out items) || !(items is object[]))
+            throw new BalanceQueryException("余额响应格式异常，请稍后重试");
+        var amounts = new List<string>();
+        foreach (object item in (object[])items)
+        {
+            var row = item as Dictionary<string, object>;
+            object currency, total;
+            decimal amount;
+            if (row == null || !row.TryGetValue("currency", out currency) || !row.TryGetValue("total_balance", out total) ||
+                !Decimal.TryParse(Convert.ToString(total, System.Globalization.CultureInfo.InvariantCulture),
+                    System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingSign,
+                    System.Globalization.CultureInfo.InvariantCulture, out amount))
+                throw new BalanceQueryException("余额响应格式异常，请稍后重试");
+            string unit = Convert.ToString(currency);
+            if (unit != "CNY" && unit != "USD") throw new BalanceQueryException("余额币种暂不支持");
+            amounts.Add(amount.ToString("N2", System.Globalization.CultureInfo.InvariantCulture) + (unit == "CNY" ? " 元" : " USD"));
+        }
+        if (amounts.Count == 0) throw new BalanceQueryException("账户暂未返回余额信息");
+        return new BalanceResult { Amount = String.Join(" / ", amounts), Available = (bool)available };
+    }
+}
+
+public static class TrayPopupFonts
+{
+    // These four immutable private faces live for the process lifetime. Keep both
+    // GDI registrations and GDI+ buffers alive: Labels/TextRenderer use GDI while
+    // System.Drawing.Font validates its family through GDI+.
+    private static readonly System.Drawing.Text.PrivateFontCollection collection = new System.Drawing.Text.PrivateFontCollection();
+    private static readonly List<IntPtr> buffers = new List<IntPtr>();
+    private static readonly List<IntPtr> registrations = new List<IntPtr>();
+    private static readonly Dictionary<string, FontFamily> faces = new Dictionary<string, FontFamily>();
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr AddFontMemResourceEx(IntPtr data, uint size, IntPtr reserved, ref uint count);
+
+    static TrayPopupFonts()
+    {
+        foreach (int weight in new[] { 400, 500, 600, 700 })
+        using (Stream resource = typeof(TrayPopupFonts).Assembly.GetManifestResourceStream("TrayUI" + weight + ".ttf.gz"))
+        using (var compressed = new System.IO.Compression.GZipStream(resource, System.IO.Compression.CompressionMode.Decompress))
+        using (var output = new MemoryStream())
+        {
+            compressed.CopyTo(output);
+            byte[] bytes = output.ToArray();
+            IntPtr memory = Marshal.AllocHGlobal(bytes.Length);
+            buffers.Add(memory);
+            Marshal.Copy(bytes, 0, memory, bytes.Length);
+            uint count = 0;
+            IntPtr registration = AddFontMemResourceEx(memory, (uint)bytes.Length, IntPtr.Zero, ref count);
+            if (registration == IntPtr.Zero || count == 0) throw new InvalidOperationException("Unable to load tray font " + weight);
+            registrations.Add(registration);
+            collection.AddMemoryFont(memory, bytes.Length);
+        }
+        foreach (FontFamily family in collection.Families) faces.Add(family.Name, family);
+    }
+
+    public static Font Create(float pixels, int weight)
+    {
+        string name = "DSH Tray UI " + weight;
+        FontFamily family;
+        if (!faces.TryGetValue(name, out family)) throw new ArgumentOutOfRangeException("weight");
+        return new Font(family, pixels, FontStyle.Regular, GraphicsUnit.Pixel);
+    }
+}
+
+public sealed class TrayPopupButton : Button
+{
+    public int IconSize = 24;
+    public int IconGap = 12;
+    public bool IconAfterText;
+    public string Glyph = "";
+    public bool Primary;
+    public bool Bare;
+    public float ScaleFactor = 1;
+    private bool hover;
+    private bool down;
+    public TrayPopupButton()
+    {
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+    }
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaintBackground(e);
+        Graphics g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        Color ink = !Enabled ? Color.FromArgb(146, 161, 189) : Primary ? Color.White : TrayPopupView.Blue;
+        Rectangle bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+        using (var path = UiShapes.RoundedRect(bounds, Math.Max(4, (int)(9 * ScaleFactor))))
+        {
+            if (Primary && Enabled)
+            {
+                using (var fill = new System.Drawing.Drawing2D.LinearGradientBrush(bounds,
+                    down ? Color.FromArgb(25, 80, 230) : Color.FromArgb(49, 153, 255),
+                    hover ? Color.FromArgb(0, 68, 228) : Color.FromArgb(0, 80, 255), 30F)) g.FillPath(fill, path);
+            }
+            else if (!Bare || hover)
+            {
+                using (var fill = new SolidBrush(hover ? Color.FromArgb(231, 240, 255) : Color.FromArgb(251, 253, 255))) g.FillPath(fill, path);
+                using (var edge = new Pen(TrayPopupView.Edge, Math.Max(1, ScaleFactor))) g.DrawPath(edge, path);
+            }
+        }
+        int icon = String.IsNullOrEmpty(Glyph) ? 0 : (int)Math.Round(IconSize * ScaleFactor);
+        int gap = icon > 0 && Text.Length > 0 ? (int)(IconGap * ScaleFactor) : 0;
+        Size measure = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+        int x = Math.Max((int)(5 * ScaleFactor), (Width - measure.Width - icon - gap) / 2);
+        if (icon > 0) PopupArt.Draw(g, Glyph, new Rectangle(IconAfterText ? x + measure.Width + gap : x, (Height - icon) / 2, icon, icon), ink);
+        if (Text.Length > 0)
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(IconAfterText ? x : x + icon + gap, 0, Math.Max(1, Width - x - icon - gap), Height),
+                ink, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -5, -5), ink, BackColor);
+    }
+}
+
+public static class PopupArt
+{
+    private static readonly System.IO.Stream startResource = typeof(PopupArt).Assembly.GetManifestResourceStream("TrayStart.png");
+    private static readonly System.IO.Stream refreshResource = typeof(PopupArt).Assembly.GetManifestResourceStream("TrayRefresh.png");
+    private static readonly System.IO.Stream restartResource = typeof(PopupArt).Assembly.GetManifestResourceStream("TrayRestart.png");
+    private static readonly Image startImage = Image.FromStream(startResource);
+    private static readonly Image refreshImage = Image.FromStream(refreshResource);
+    private static readonly Image restartImage = Image.FromStream(restartResource);
+    private static void DrawTinted(Graphics g, Image image, Rectangle rectangle, Color color)
+    {
+        using (var attributes = new System.Drawing.Imaging.ImageAttributes())
+        {
+            var matrix = new System.Drawing.Imaging.ColorMatrix(new float[][] {
+            new float[] { 0, 0, 0, color.R / 255F, 0 },
+            new float[] { 0, 0, 0, color.G / 255F, 0 },
+            new float[] { 0, 0, 0, color.B / 255F, 0 },
+            new float[] { 0, 0, 0, 1, 0 },
+            new float[] { 0, 0, 0, 0, 1 } });
+            attributes.SetColorMatrix(matrix);
+            g.DrawImage(image, rectangle, 0, 0, image.Width, image.Height,
+                GraphicsUnit.Pixel, attributes);
+        }
+    }
+
+
+    // Actual geometry, excluding the stroke, rather than the nominal 24px canvas.
+    // Fit it proportionally into the requested icon box so internal SVG padding
+    // cannot make a 20px action icon look like a 14px one.
+    private static RectangleF GeometryBounds(string name)
+    {
+        switch (name)
+        {
+            case "start": return new RectangleF(3, 2, 18, 20);
+            case "stop": return new RectangleF(4, 4, 16, 16);
+            case "more": return new RectangleF(3, 10, 18, 4);
+            case "update": return new RectangleF(3, 2, 18, 20);
+            case "page": return new RectangleF(2, 2, 20, 20);
+            case "close": return new RectangleF(5, 5, 14, 14);
+            case "settings": return new RectangleF(2, 2, 20, 20);
+            case "refresh": return new RectangleF(3, 3, 18, 18);
+            case "log": return new RectangleF(2, 4, 20, 17);
+            case "expand": return new RectangleF(3, 3, 18, 18);
+            case "exit": return new RectangleF(2, 4, 18, 16);
+            default: return RectangleF.Empty;
+        }
+    }
+
+    public static void Draw(Graphics g, string name, Rectangle rectangle, Color color)
+    {
+        var state = g.Save();
+        if (name == "start")
+        {
+            g.DrawImage(startImage, rectangle);
+            g.Restore(state);
+            return;
+        }
+        if (name == "refresh")
+        {
+            g.DrawImage(refreshImage, rectangle);
+            g.Restore(state);
+            return;
+        }
+        if (name == "restart")
+        {
+            g.DrawImage(restartImage, rectangle);
+            g.Restore(state);
+            return;
+        }
+        // Fit each glyph's native artwork bounds into the square target with
+        // one uniform scale.  This removes inconsistent internal whitespace
+        // while preserving the original aspect ratio (no X/Y stretching).
+        RectangleF geometry = GeometryBounds(name);
+        float target = Math.Min(rectangle.Width, rectangle.Height);
+        float usableTarget = Math.Max(1F, target - 7F);
+        float factor = geometry.IsEmpty ? usableTarget / 24F : usableTarget / Math.Max(geometry.Width, geometry.Height);
+        float centerX = rectangle.X + rectangle.Width / 2F;
+        float centerY = rectangle.Y + rectangle.Height / 2F;
+        g.TranslateTransform(centerX, centerY);
+        g.ScaleTransform(factor, factor);
+        if (!geometry.IsEmpty)
+            g.TranslateTransform(-geometry.X - geometry.Width / 2F, -geometry.Y - geometry.Height / 2F);
+        else
+            g.TranslateTransform(-12F, -12F);
+        float penWidth = 1.8F;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var pen = new Pen(color, penWidth))
+        using (var brush = new SolidBrush(color))
+        {
+            pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+            pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+            switch (name)
+            {
+                case "more": g.FillEllipse(brush, 3, 10, 4, 4); g.FillEllipse(brush, 10, 10, 4, 4); g.FillEllipse(brush, 17, 10, 4, 4); break;
+                case "update":
+                    g.DrawPolygon(pen, new[] { new PointF(12, 2), new PointF(21, 7), new PointF(21, 17),
+                        new PointF(12, 22), new PointF(3, 17), new PointF(3, 7) });
+                    g.DrawEllipse(pen, 8, 8, 8, 8); break;
+                case "close": g.DrawLine(pen, 5, 5, 19, 19); g.DrawLine(pen, 19, 5, 5, 19); break;
+                case "stop": g.FillRectangle(brush, 4, 4, 16, 16); break;
+                case "start":
+                    g.DrawImage(startImage, rectangle); break;
+                case "page":
+                    g.DrawLines(pen, new[] { new PointF(20, 13), new PointF(20, 22), new PointF(2, 22), new PointF(2, 4), new PointF(11, 4) });
+                    g.DrawLines(pen, new[] { new PointF(14, 2), new PointF(22, 2), new PointF(22, 10) });
+                    g.DrawLine(pen, 10, 14, 22, 2); break;
+                case "refresh":
+                    g.DrawImage(refreshImage, rectangle); break;
+                case "settings":
+                    var points = new PointF[32];
+                    for (int i = 0; i < points.Length; i++)
+                    {
+                        double a = i * Math.PI / 16;
+                        float r = (i % 4 == 0 || i % 4 == 3) ? 10 : 8;
+                        points[i] = new PointF(12 + r * (float)Math.Cos(a), 12 + r * (float)Math.Sin(a));
+                    }
+                    g.DrawPolygon(pen, points); g.DrawEllipse(pen, 8.5F, 8.5F, 7, 7); break;
+                case "coins":
+                    g.DrawEllipse(pen, 2, 2, 13, 6); g.DrawLine(pen, 2, 5, 2, 17); g.DrawLine(pen, 15, 5, 15, 11);
+                    g.DrawArc(pen, 2, 8, 13, 6, 0, 180); g.DrawArc(pen, 2, 14, 13, 6, 0, 180);
+                    g.DrawEllipse(pen, 12, 11, 10, 5); g.DrawLine(pen, 12, 13.5F, 12, 21); g.DrawLine(pen, 22, 13.5F, 22, 21);
+                    g.DrawArc(pen, 12, 16, 10, 5, 0, 180); g.DrawArc(pen, 12, 18, 10, 5, 0, 180); break;
+                case "log": g.DrawLines(pen, new[] { new PointF(2, 13), new PointF(6, 13), new PointF(9, 4), new PointF(13, 21), new PointF(16, 11), new PointF(22, 11) }); break;
+                case "exit":
+                    g.DrawLines(pen, new[] { new PointF(10, 4), new PointF(20, 4), new PointF(20, 20), new PointF(10, 20) });
+                    g.DrawLine(pen, 2, 12, 14, 12); g.DrawLines(pen, new[] { new PointF(9, 7), new PointF(14, 12), new PointF(9, 17) }); break;
+                case "expand":
+                    g.DrawLines(pen, new[] { new PointF(9, 3), new PointF(3, 3), new PointF(3, 9) });
+                    g.DrawLines(pen, new[] { new PointF(15, 3), new PointF(21, 3), new PointF(21, 9) });
+                    g.DrawLines(pen, new[] { new PointF(3, 15), new PointF(3, 21), new PointF(9, 21) });
+                    g.DrawLines(pen, new[] { new PointF(15, 21), new PointF(21, 21), new PointF(21, 15) }); break;
+                case "check": g.DrawLines(pen, new[] { new PointF(5, 12), new PointF(10, 17), new PointF(19, 7) }); break;
+                default:
+                    UiIcon icon = name == "folder" ? UiIcon.InstallDirectory : name == "layers" ? UiIcon.Layers :
+                        name == "package" ? UiIcon.Package : name == "page" ? UiIcon.OpenPage :
+                        name == "scan" ? UiIcon.Rescan : name == "uninstall" ? UiIcon.Uninstall :
+                        name == "install" ? UiIcon.Install : UiIcon.None;
+                    UiIconPainter.Draw(g, icon, new Rectangle(0, 0, 24, 24), color); break;
+            }
+        }
+        g.Restore(state);
+    }
+}
+
+public sealed class TrayPopupView : UserControl
+{
+    public static readonly Color Blue = Color.FromArgb(37, 99, 235);
+    public static readonly Color Ink = Color.FromArgb(15, 23, 42);
+    public static readonly Color Muted = Color.FromArgb(100, 116, 139);
+    public static readonly Color Edge = Color.FromArgb(229, 234, 242);
+    private readonly Dictionary<string, Control> fields = new Dictionary<string, Control>();
+    private readonly List<Font> fonts = new List<Font>();
+    private readonly ToolTip tips = new ToolTip();
+    private readonly RichTextBox log;
+    private readonly UiBrandMark brand = new UiBrandMark();
+    private readonly ContextMenuStrip logMenu = new ContextMenuStrip();
+    private readonly ContextMenuStrip moreMenu = new ContextMenuStrip();
+    private ToolStripItem uninstallItem;
+    private ToolStripItem folderItem;
+    private ToolStripItem balanceSettingsItem;
+    private ToolStripItem scanItem;
+    private ToolStripItem updateItem;
+    private float scale = 1;
+    private bool running;
+    private bool installed;
+    private bool waiting = true;
+    public bool Expanded;
+    public bool MenuOpen { get { return logMenu.Visible || moreMenu.Visible; } }
+    public event Action<string> Action;
+
+    public TrayPopupView(RichTextBox logBox)
+    {
+        AutoScaleMode = AutoScaleMode.None;
+        DoubleBuffered = true;
+        BackColor = Color.FromArgb(247, 250, 255);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        log = logBox;
+        Controls.Add(brand);
+        LabelField("title", "DeepSeek Harness");
+        LabelField("tagline", "轻量 · 高效 · 稳定");
+        LabelField("balanceTitle", "DeepSeek 余额");
+        LabelField("amount", "—");
+        LabelField("amountUnit", "");
+        LabelField("balanceHint", "点击右上角设置，配置 DeepSeek API Key");
+        string[] captions = { "安装目录", "状态", "运行状态", "版本" };
+        for (int i = 0; i < captions.Length; i++)
+        {
+            LabelField("caption" + i, captions[i]);
+            LabelField("value" + i, "—");
+        }
+        LabelField("logTitle", "运行日志");
+        LabelField("footer", "控制面板 v" + PanelVersionPolicy.Version);
+        folderItem = moreMenu.Items.Add("目录", null, delegate { Raise("folder"); });
+        scanItem = moreMenu.Items.Add("扫描", null, delegate { Raise("scan"); });
+        updateItem = moreMenu.Items.Add("更新", null, delegate { Raise("update"); });
+        uninstallItem = moreMenu.Items.Add("卸载", null, delegate { Raise("uninstall"); });
+        moreMenu.Items.Add(new ToolStripSeparator());
+        balanceSettingsItem = moreMenu.Items.Add("更多设置", null, delegate { Raise("settings"); });
+        ButtonField("close", "", "close", true, "收起面板（继续在托盘运行）");
+        ButtonField("balance", "", "refresh", false, "刷新 DeepSeek 余额");
+        ButtonField("primary", "安装", "install", false, "安装 / 启动 / 停止").Primary = true;
+        ButtonField("restart", "重启", "restart", false, "重启 Harness");
+        ButtonField("page", "打开", "page", false, "打开 Harness 页面");
+        ButtonField("update", "更新", "update", false, "检查 Harness 更新");
+        var more = ButtonField("more", "更多", "more", false, "目录、扫描、更新、卸载和余额设置");
+        more.Click += delegate { moreMenu.Show(more, new Point(more.Width, more.Height), ToolStripDropDownDirection.BelowLeft); };
+        var expand = ButtonField("expand", "展开", "expand", true, "展开 / 收起日志");
+        expand.IconSize = 20; expand.IconGap = 0; expand.IconAfterText = true;
+        ButtonField("exit", "退出", "exit", false, "退出控制面板，保留 Harness 运行");
+        log.ReadOnly = true;
+        log.BorderStyle = BorderStyle.None;
+        log.BackColor = Color.FromArgb(237, 245, 255);
+        log.ForeColor = Muted;
+        log.WordWrap = true;
+        log.ScrollBars = RichTextBoxScrollBars.Vertical;
+        log.HideSelection = false;
+        log.AccessibleName = "运行日志";
+        log.HandleCreated += delegate { ApplyLogLineHeight(); };
+        logMenu.Items.Add("导出日志…", null, delegate { Raise("export"); });
+        logMenu.Items.Add("清空日志…", null, delegate { Raise("clear"); });
+        log.ContextMenuStrip = logMenu;
+        Controls.Add(log);
+        ApplyScale(1);
+    }
+
+    private void Raise(string action) { if (Action != null) Action(action); }
+    private void LabelField(string key, string text)
+    {
+        var label = new Label { Name = key, Text = text, AutoSize = false, AutoEllipsis = true,
+            TextAlign = ContentAlignment.MiddleLeft, BackColor = Color.Transparent, ForeColor = Muted };
+        fields.Add(key, label); Controls.Add(label);
+    }
+    private TrayPopupButton ButtonField(string key, string text, string glyph, bool bare, string accessible)
+    {
+        var button = new TrayPopupButton { Name = key, Text = text, Glyph = glyph, Bare = bare, AccessibleName = accessible };
+        button.Click += delegate { Raise(key); };
+        tips.SetToolTip(button, accessible);
+        fields.Add(key, button); Controls.Add(button);
+        return button;
+    }
+
+    public void ApplyScale(float value)
+    {
+        if (fonts.Count > 0 && Math.Abs(scale - value) < 0.001F) { LayoutContent(); return; }
+        scale = value;
+        SuspendLayout();
+        var old = fonts.ToArray(); fonts.Clear();
+        foreach (KeyValuePair<string, Control> entry in fields)
+        {
+            float size = 17;
+            int weight = 500;
+            if (entry.Key == "title") { size = 22; weight = 600; }
+            if (entry.Key == "amount") { size = 36; weight = 700; }
+            if (entry.Key == "amountUnit") size = 18;
+            if (entry.Key == "tagline" || entry.Key == "balanceHint") { size = 14; weight = 400; }
+            if (entry.Key == "footer") size = 14;
+            if (entry.Key == "logTitle") { size = 18; weight = 600; }
+            if (entry.Key == "balanceTitle" || entry.Key == "exit") size = 16;
+            if (entry.Key.StartsWith("caption")) { size = 14; weight = 400; }
+            if (entry.Key.StartsWith("value")) size = 16;
+            if (entry.Key == "expand") { size = 14; weight = 400; }
+            if (entry.Key == "primary" || entry.Key == "restart" || entry.Key == "page" ||
+                entry.Key == "update" || entry.Key == "more") size = 15;
+            Font font = TrayPopupFonts.Create(size * scale, weight);
+            fonts.Add(font); entry.Value.Font = null; entry.Value.Font = font;
+            var button = entry.Value as TrayPopupButton;
+            if (button != null)
+            {
+                button.ScaleFactor = scale;
+                button.IconSize = entry.Key == "close" ? 20 :
+                    entry.Key == "balance" ? 20 :
+                    entry.Key == "primary" || entry.Key == "restart" || entry.Key == "page" ||
+                    entry.Key == "update" || entry.Key == "more" ? 18 : 20;
+                if (entry.Key == "primary" || entry.Key == "restart" || entry.Key == "page" ||
+                    entry.Key == "update" || entry.Key == "more") button.IconGap = 8;
+            }
+        }
+        fields["title"].ForeColor = fields["balanceTitle"].ForeColor = fields["logTitle"].ForeColor = Ink;
+        fields["footer"].ForeColor = Ink;
+        fields["amount"].ForeColor = Blue;
+        fields["amountUnit"].ForeColor = Blue;
+        Font logFont = new Font("Consolas", 14 * scale, FontStyle.Regular, GraphicsUnit.Pixel);
+        fonts.Add(logFont); log.Font = null; log.Font = logFont;
+        ApplyLogLineHeight();
+        Font menuFont = TrayPopupFonts.Create(16 * scale, 500);
+        fonts.Add(menuFont); moreMenu.Font = menuFont;
+        moreMenu.BackColor = Color.White; moreMenu.ForeColor = Ink;
+        moreMenu.ImageScalingSize = new Size((int)Math.Round(24 * scale), (int)Math.Round(24 * scale));
+        string[] menuGlyphs = { "folder", "scan", "update", "uninstall", "", "update" };
+        for (int i = 0; i < moreMenu.Items.Count; i++)
+        {
+            ToolStripItem item = moreMenu.Items[i];
+            if (item is ToolStripSeparator) continue;
+            item.AutoSize = false; item.Size = new Size((int)Math.Round(156 * scale), (int)Math.Round(32 * scale));
+            if (item.Image != null) item.Image.Dispose();
+            var bitmap = new Bitmap(moreMenu.ImageScalingSize.Width, moreMenu.ImageScalingSize.Height);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+                PopupArt.Draw(graphics, menuGlyphs[i], new Rectangle(Point.Empty, bitmap.Size), Ink);
+            item.Image = bitmap;
+        }
+        foreach (Font font in old) font.Dispose();
+        LayoutContent();
+        ResumeLayout(true); Invalidate();
+    }
+
+    private Rectangle R(float x, float y, float w, float h)
+    {
+        // Away-from-zero rounding keeps a half-pixel gap from closing: bank rounding
+        // makes one row end at .5 while the next starts at .5, and the pair can meet
+        // with a one pixel overlap that clips a row.
+        return new Rectangle((int)Math.Round(x * scale, MidpointRounding.AwayFromZero),
+            (int)Math.Round(y * scale, MidpointRounding.AwayFromZero),
+            Math.Max(1, (int)Math.Round(w * scale, MidpointRounding.AwayFromZero)),
+            Math.Max(1, (int)Math.Round(h * scale, MidpointRounding.AwayFromZero)));
+    }
+
+    // PARAFORMAT2: exact line spacing in twips, without changing text or colours.
+    [StructLayout(LayoutKind.Explicit, Size = 188)]
+    private struct LogParagraphFormat
+    {
+        [FieldOffset(0)] public uint Size;
+        [FieldOffset(4)] public uint Mask;
+        [FieldOffset(164)] public int LineSpacing;
+        [FieldOffset(170)] public byte Rule;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, ref LogParagraphFormat format);
+    private void ApplyLogLineHeight()
+    {
+        if (!log.IsHandleCreated) return;
+        float dpi;
+        using (Graphics graphics = log.CreateGraphics()) dpi = graphics.DpiY;
+        var format = new LogParagraphFormat { Size = 188, Mask = 0x100,
+            LineSpacing = (int)Math.Round(22 * scale * 1440 / dpi), Rule = 4 };
+        int start = log.SelectionStart, length = log.SelectionLength;
+        log.SelectAll();
+        SendMessage(log.Handle, 0x447, IntPtr.Zero, ref format);
+        log.Select(start, length);
+    }
+    private void Place(string key, float x, float y, float w, float h) { fields[key].Bounds = R(x, y, w, h); }
+    protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); if (fields.ContainsKey("exit")) LayoutContent(); }
+
+    private void LayoutContent()
+    {
+        float w = Math.Max(460, Width / scale), h = Height / scale;
+        brand.BackColor = BackColor; brand.Bounds = R(16, 20, 54, 54);
+        Place("title", 82, 20, 240, 32); Place("tagline", 82, 52, 230, 22);
+        Place("close", w - 48, 26, 36, 36);
+        Place("balanceTitle", 36, 102, 320, 24);
+        float amountWidth = Math.Min(330, fields["amount"].GetPreferredSize(Size.Empty).Width / scale + 4);
+        Place("amount", 36, 126, amountWidth, 52);
+        Place("amountUnit", 36 + amountWidth + 6, 146, 44, 28);
+        Place("balanceHint", 36, 178, w - 72, 22);
+        Place("balance", w - 76, 120, 44, 44);
+        float[] starts = { 16, 120, 236, 360 };
+        float[] sizes = { 104, 116, 124, w - 376 };
+        for (int i = 0; i < 4; i++)
+        {
+            Place("caption" + i, starts[i] + 10, 224, sizes[i] - 20, 22);
+            Place("value" + i, starts[i] + 10, 250, sizes[i] - 20, 26);
+            ((Label)fields["caption" + i]).TextAlign = ContentAlignment.MiddleCenter;
+            ((Label)fields["value" + i]).TextAlign = ContentAlignment.MiddleCenter;
+        }
+        // Version and paths may be long: ellipsis is deliberate, full text is in the tooltip.
+        Place("value1", 146, 250, 80, 26); Place("value2", 262, 250, 88, 26);
+        string[] actions = { "primary", "restart", "page", "update", "more" };
+        for (int i = 0; i < actions.Length; i++) Place(actions[i], 16 + i * 100, 298, 88, 44);
+        Place("logTitle", 64, 370, 240, 32); Place("expand", w - 92, 370, 60, 32);
+        float logHeight = Math.Max(50, h - 524);
+        log.Bounds = R(32, 412, w - 64, logHeight);
+        Place("footer", 56, h - 64, w - 188, 44); Place("exit", w - 118, h - 64, 102, 44);
+        fields["expand"].Text = Expanded ? "收起" : "展开";
+    }
+
+    public void Sync(HarnessStatusSnapshot snapshot, string root, string primaryText, bool primaryEnabled,
+        bool restart, bool page, bool folder, bool update, bool scan, bool uninstall, string operation)
+    {
+        bool changed = waiting || running != snapshot.Running || installed != snapshot.Installed;
+        waiting = false; running = snapshot.Running; installed = snapshot.Installed;
+        fields["value0"].Text = String.IsNullOrEmpty(root) ? "未安装" : root;
+        fields["value1"].Text = snapshot.MultipleInstalls ? "多个安装" : installed && !snapshot.Ready ? "需修复" : installed ? "已安装" : "未安装";
+        fields["value2"].Text = running ? "正在运行" : snapshot.PortBusy ? "端口占用" : "未运行";
+        fields["value3"].Text = installed ? HarnessVersionText.ForDisplay(snapshot.Version) : "—";
+        tips.SetToolTip(fields["value0"], root); tips.SetToolTip(fields["value1"], snapshot.StatusText);
+        tips.SetToolTip(fields["value2"], snapshot.RunningText + (running ? " · 127.0.0.1:3080" : ""));
+        tips.SetToolTip(fields["value3"], snapshot.Version);
+        fields["value0"].ForeColor = fields["value3"].ForeColor = Ink;
+        fields["value1"].ForeColor = installed && snapshot.Ready ? Color.FromArgb(0, 146, 58) : Muted;
+        fields["value2"].ForeColor = running ? Color.FromArgb(0, 146, 58) : Muted;
+        var primary = (TrayPopupButton)fields["primary"];
+        if (primary.Text != primaryText)
+        {
+            primary.Text = primaryText;
+            primary.Glyph = primaryText == "停止" || primaryText == "取消" ? "stop" : primaryText == "启动" ? "start" : "install";
+        }
+        fields["primary"].Enabled = primaryEnabled; fields["restart"].Enabled = restart;
+        fields["page"].Enabled = page; folderItem.Enabled = folder; fields["update"].Enabled = update;
+        scanItem.Enabled = scan; updateItem.Enabled = update; uninstallItem.Enabled = uninstall;
+        fields["footer"].Text = String.IsNullOrEmpty(operation) ? "控制面板 v" + PanelVersionPolicy.Version : operation;
+        tips.SetToolTip(fields["footer"], fields["footer"].Text);
+        if (changed) Invalidate();
+    }
+    public void SetBalance(string amount, string hint)
+    {
+        bool singleYuan = amount.EndsWith(" 元", StringComparison.Ordinal) && amount.IndexOf('/') < 0;
+        fields["amount"].Text = singleYuan ? amount.Substring(0, amount.Length - 2) : amount;
+        fields["amountUnit"].Text = singleYuan ? "元" : "";
+        fields["balanceHint"].Text = hint;
+        tips.SetToolTip(fields["amount"], amount); tips.SetToolTip(fields["balanceHint"], hint);
+        LayoutContent();
+    }
+    public void SetBalanceLoading(bool loading)
+    {
+        fields["balance"].Enabled = !loading;
+        fields["balance"].AccessibleName = loading ? "正在查询余额" : "刷新 DeepSeek 余额";
+        tips.SetToolTip(fields["balance"], fields["balance"].AccessibleName);
+        balanceSettingsItem.Enabled = !loading;
+    }
+    private void Card(Graphics g, RectangleF bounds, Color from, Color to)
+    {
+        using (var shape = UiShapes.RoundedRect(Rectangle.Round(bounds), 12))
+        using (var fill = new System.Drawing.Drawing2D.LinearGradientBrush(bounds, from, to, 25F))
+        using (var pen = new Pen(Edge, 1)) { g.FillPath(fill, shape); g.DrawPath(pen, shape); }
+    }
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        e.Graphics.Clear(BackColor);
+        var state = e.Graphics.Save(); e.Graphics.ScaleTransform(scale, scale);
+        var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        float w = Width / scale, h = Height / scale;
+        Card(g, new RectangleF(16, 90, w - 32, 112), Color.FromArgb(230, 240, 255), Color.FromArgb(214, 234, 255));
+        Card(g, new RectangleF(16, 218, w - 32, 64), Color.White, Color.FromArgb(253, 254, 255));
+        Card(g, new RectangleF(16, 358, w - 32, Math.Max(110, h - 448)), Color.White, Color.FromArgb(253, 254, 255));
+        Card(g, new RectangleF(24, 404, w - 48, Math.Max(60, h - 502)), Color.FromArgb(237, 245, 255), Color.FromArgb(237, 245, 255));
+        using (var pen = new Pen(Edge))
+        {
+            foreach (int x in new[] { 120, 236, 360 }) g.DrawLine(pen, x, 230, x, 270);
+        }
+        using (var brush = new SolidBrush(fields["value1"].ForeColor)) g.FillEllipse(brush, 136, 258, 9, 9);
+        using (var brush = new SolidBrush(fields["value2"].ForeColor)) g.FillEllipse(brush, 252, 258, 9, 9);
+        using (var brush = new SolidBrush(Color.FromArgb(231, 239, 255))) g.FillEllipse(brush, 24, 370, 32, 32);
+        PopupArt.Draw(g, "log", new Rectangle(30, 376, 20, 20), Ink);
+        using (var brush = new SolidBrush(running ? Color.FromArgb(0, 147, 61) : Muted)) g.FillEllipse(brush, 16, h - 56, 28, 28);
+        PopupArt.Draw(g, running ? "check" : "stop", new Rectangle(20, (int)h - 52, 20, 20), Color.White);
+        e.Graphics.Restore(state);
+    }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (ToolStripItem item in moreMenu.Items) if (item.Image != null) item.Image.Dispose();
+            tips.Dispose(); logMenu.Dispose(); moreMenu.Dispose(); foreach (Font font in fonts) font.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+public sealed class BalanceSettingsForm : Form
+{
+    private readonly float scale;
+
+    public BalanceSettingsForm()
+    {
+        // Point-sized fonts already follow the monitor DPI, so only the geometry is
+        // scaled here. AutoScaleMode.Dpi would scale the fonts a second time on this
+        // machine, which is what made the earlier dialogs disagree with the popup.
+        scale = Math.Max(1F, TrayPopupLayout.DpiAt(Cursor.Position) / 96F);
+        Text = "DeepSeek 余额设置";
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ShowInTaskbar = false;
+        BackColor = Color.FromArgb(247, 250, 255);
+        Font = new Font("Microsoft YaHei UI", 9F);
+        AutoScaleMode = AutoScaleMode.None;
+        ClientSize = new Size(R(460), R(258));
+
+        var title = new Label
+        {
+            Text = "DeepSeek 余额",
+            Bounds = new Rectangle(R(24), R(18), R(412), R(32)),
+            Font = new Font("Microsoft YaHei UI", 13F, FontStyle.Bold),
+            ForeColor = TrayPopupView.Ink, BackColor = Color.Transparent
+        };
+        var hint = new Label
+        {
+            Text = "粘贴 DeepSeek API Key，密钥在本机加密保存，只用于查询余额。",
+            Bounds = new Rectangle(R(25), R(54), R(412), R(24)),
+            ForeColor = TrayPopupView.Muted, BackColor = Color.Transparent
+        };
+        var key = new TextBox
+        {
+            Bounds = new Rectangle(R(24), R(84), R(412), R(32)),
+            UseSystemPasswordChar = true, AccessibleName = "DeepSeek API Key",
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        // The field always starts empty. A stored key is never read back into the UI:
+        // saving an empty field keeps whatever is already on disk.
+        var note = new Label
+        {
+            Text = DeepSeekBalanceClient.HasSavedKey
+                ? "已保存密钥。留空直接保存不会覆盖；填新密钥则替换。"
+                : "也可使用 DEEPSEEK_API_KEY 环境变量，或留空保存稍后再填。",
+            Bounds = new Rectangle(R(25), R(124), R(412), R(46)),
+            ForeColor = TrayPopupView.Muted, BackColor = Color.Transparent
+        };
+        var get = new Button
+        {
+            Text = "在 platform.deepseek.com 获取密钥",
+            Bounds = new Rectangle(R(20), R(176), R(230), R(30)),
+            FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(247, 250, 255),
+            ForeColor = TrayPopupView.Blue, TextAlign = ContentAlignment.MiddleLeft,
+            Cursor = Cursors.Hand, TabStop = false
+        };
+        get.FlatAppearance.BorderSize = 0;
+        get.Click += delegate
+        {
+            try { Process.Start("https://platform.deepseek.com/api_keys"); }
+            catch (Exception) { note.Text = "无法打开浏览器，请手动访问 platform.deepseek.com/api_keys。"; }
+        };
+
+        var save = new UiFlatButton { Text = "保存", IsPrimary = true, Bounds = new Rectangle(R(344), R(212), R(92), R(34)) };
+        var cancel = new UiFlatButton { Text = "取消", Bounds = new Rectangle(R(244), R(212), R(92), R(34)), DialogResult = DialogResult.Cancel };
+        var clear = new UiFlatButton { Text = "移除已保存密钥", IsDanger = true, Bounds = new Rectangle(R(24), R(212), R(150), R(34)), Enabled = DeepSeekBalanceClient.HasSavedKey };
+        save.Click += delegate
+        {
+            try
+            {
+                string entered = key.Text.Trim();
+                if (entered.Length > 0)
+                {
+                    if (entered.Any(Char.IsWhiteSpace)) { note.Text = "API Key 不应包含空格或换行，请检查后重试。"; return; }
+                    DeepSeekBalanceClient.SaveKey(entered);
+                }
+                DialogResult = DialogResult.OK; Close();
+            }
+            catch (Exception) { note.Text = "保存失败，请检查本机配置目录的访问权限。"; }
+        };
+        clear.Click += delegate
+        {
+            try { DeepSeekBalanceClient.ClearKey(); DialogResult = DialogResult.OK; Close(); }
+            catch (Exception) { note.Text = "移除失败，请检查本机配置目录的访问权限。"; }
+        };
+        Controls.AddRange(new Control[] { title, hint, key, note, get, save, clear, cancel });
+        AcceptButton = save; CancelButton = cancel;
+    }
+
+    /// <summary>Design units (96 DPI) to device pixels for this monitor.</summary>
+    private int R(float value) { return (int)Math.Round(value * scale); }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        TrayPopupLayout.RoundWindow(Handle);
+    }
+}
+
 public static class Program
 {
     /// <summary>Guards against a cascade of dialogs when faults repeat.</summary>
@@ -6674,7 +7902,8 @@ public static class Program
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new ManagerForm());
+            using (var context = new TrayPanelContext())
+                Application.Run(context);
         }
     }
 
@@ -6685,6 +7914,8 @@ public static class Program
     private static void ActivateRunningInstance()
     {
         bool focused = TryFocusExistingPanel();
+        if (focused)
+            return;
         MessageBox.Show(
             SingleInstancePolicy.BuildAlreadyRunningMessage(HarnessPortPolicy.DefaultPort),
             "DeepSeek Harness 控制面板",
@@ -6719,7 +7950,9 @@ public static class Program
 
                 NativeMethods.RECT rect;
                 NativeMethods.GetWindowRect(hWnd, out rect);
-                if (!SingleInstancePolicy.IsMainPanelWindow(
+                if (!(SingleInstancePolicy.IsPanelWindowClass(className.ToString()) &&
+                      title.ToString() == "DeepSeek Harness 控制面板") &&
+                    !SingleInstancePolicy.IsMainPanelWindow(
                         className.ToString(),
                         title.ToString(),
                         rect.Right - rect.Left,
@@ -6740,6 +7973,7 @@ public static class Program
 
         try
         {
+            NativeMethods.PostMessage(found, TrayPanelContext.ActivateMessage, IntPtr.Zero, IntPtr.Zero);
             if (NativeMethods.IsIconic(found))
                 NativeMethods.ShowWindow(found, NativeMethods.SW_RESTORE);
             NativeMethods.SetForegroundWindow(found);

@@ -26,6 +26,14 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 # associated-icon API only ever hands back the 32px frame, which is why the mark was soft.
 & $compiler /nologo /target:winexe ('/out:' + $output) ('/win32icon:' + $icon) ('/win32manifest:' + $manifest) `
     ('/resource:' + $icon + ',DeepSeekHarness.ico') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\fonts\TrayUI400.ttf.gz') + ',TrayUI400.ttf.gz') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\fonts\TrayUI500.ttf.gz') + ',TrayUI500.ttf.gz') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\fonts\TrayUI600.ttf.gz') + ',TrayUI600.ttf.gz') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\fonts\TrayUI700.ttf.gz') + ',TrayUI700.ttf.gz') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\fonts\OFL.txt') + ',TrayFonts.OFL.txt') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\icons\png\start.png') + ',TrayStart.png') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\icons\png\refresh.png') + ',TrayRefresh.png') `
+    ('/resource:' + (Join-Path $projectRoot 'assets\icons\png\restart.png') + ',TrayRestart.png') `
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
     /r:System.Net.Http.dll `

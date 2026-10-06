@@ -46,6 +46,8 @@ public static class StopTargetResolverTests
 
     private static void RunAll()
     {
+        TrayBalanceTests.Run();
+        TrayPopupRenderingTests.Run();
         ControlPanelLayoutTests.Run();
         BrandMarkArtTests.Run();
         UiBackgroundTests.Run();
